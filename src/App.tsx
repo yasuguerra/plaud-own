@@ -26,6 +26,8 @@ import {
 
 import { StudySession, ProcessingStatus, ActionItem, Flashcard, ChatMessage, TopicFolder } from "./types";
 import AudioRecorder from "./components/AudioRecorder";
+import { googleProvider, signInWithPopup, signOut, User, initFirebase } from "./firebase";
+import { onAuthStateChanged } from "firebase/auth";
 import ActionItemsList from "./components/ActionItemsList";
 import FlashcardsDeck from "./components/FlashcardsDeck";
 import MindMapCanvas from "./components/MindMapCanvas";
@@ -156,6 +158,10 @@ export default function App() {
   const [isSynthesizingFolder, setIsSynthesizingFolder] = useState(false);
   const [selectedSynthesisFolderId, setSelectedSynthesisFolderId] = useState<string | null>(null);
 
+  // Firebase Auth states
+  const [user, setUser] = useState<User | null>(null);
+  const [authLoading, setAuthLoading] = useState(true);
+
   // Ingestion Tabs & Inputs state for high-capacity files handling and simulation
   const [activeIngestTab, setActiveIngestTab] = useState<"upload" | "paste" | "simulate">("upload");
   const [pastedTitle, setPastedTitle] = useState("");
@@ -163,17 +169,47 @@ export default function App() {
   const [simTopic, setSimTopic] = useState("");
   const [simMediaType, setSimMediaType] = useState<"audio" | "video">("audio");
 
-  // Load sessions from Firestore backend on mount (falling back to localStorage)
+  // Listen for Firebase Auth state changes after dynamic initialization
   useEffect(() => {
+    let unsubscribe: () => void = () => {};
+    
+    const setupAuth = async () => {
+      const activeAuth = await initFirebase();
+      if (activeAuth) {
+        unsubscribe = onAuthStateChanged(activeAuth, (currentUser) => {
+          setUser(currentUser);
+          setAuthLoading(false);
+        });
+      } else {
+        // Fallback if client-side init fails
+        setAuthLoading(false);
+      }
+    };
+
+    setupAuth();
+    return () => {
+      if (unsubscribe) unsubscribe();
+    };
+  }, []);
+
+  // Fetch sessions and folders when authenticated user changes
+  useEffect(() => {
+    if (authLoading) return;
+
+    const userId = user ? user.uid : "guest";
+    const headers = { "x-user-id": userId };
+
     const loadSessions = async () => {
       try {
-        const response = await fetch("/api/sessions");
+        const response = await fetch("/api/sessions", { headers });
         if (response.ok) {
           const parsed = await response.json();
-          console.log("[SYNC] Loaded sessions from Firestore:", parsed.length);
+          console.log(`[SYNC] Loaded ${parsed.length} sessions for user ${userId}`);
           setSessions(parsed);
           if (parsed.length > 0) {
             setActiveSessionId(parsed[0].id);
+          } else {
+            setActiveSessionId(null);
           }
           // Also sync to local storage as a quick backup
           localStorage.setItem("study_buddy_sessions", JSON.stringify(parsed));
@@ -183,7 +219,7 @@ export default function App() {
         console.warn("[SYNC WARNING] Failed to load sessions from Firestore backend, trying localStorage", e);
       }
 
-      // Local storage fallback
+      // Local storage fallback (only for guest or if fetch fails)
       const saved = localStorage.getItem("study_buddy_sessions");
       if (saved) {
         try {
@@ -200,10 +236,10 @@ export default function App() {
 
     const loadFolders = async () => {
       try {
-        const response = await fetch("/api/folders");
+        const response = await fetch("/api/folders", { headers });
         if (response.ok) {
           const parsed = await response.json();
-          console.log("[SYNC] Loaded folders from Firestore:", parsed.length);
+          console.log(`[SYNC] Loaded ${parsed.length} folders for user ${userId}`);
           setFolders(parsed);
         }
       } catch (e) {
@@ -223,7 +259,7 @@ export default function App() {
       .catch(err => {
         console.error("Failed to ping health endpoint", err);
       });
-  }, []);
+  }, [user, authLoading]);
 
   // Save sessions to localStorage and sync with Firestore backend
   const saveSessions = async (updatedList: StudySession[]) => {
@@ -231,12 +267,21 @@ export default function App() {
     setSessions(updatedList);
     localStorage.setItem("study_buddy_sessions", JSON.stringify(updatedList));
 
+    const userId = user ? user.uid : "guest";
+    const headers = { 
+      "Content-Type": "application/json",
+      "x-user-id": userId 
+    };
+
     // 2. Determine if there's any deleted session
     const deletedSession = sessions.find(s => !updatedList.some(u => u.id === s.id));
     if (deletedSession) {
       try {
         console.log("[SYNC] Deleting session from Firestore:", deletedSession.id);
-        await fetch(`/api/sessions/${deletedSession.id}`, { method: "DELETE" });
+        await fetch(`/api/sessions/${deletedSession.id}`, { 
+          method: "DELETE",
+          headers: { "x-user-id": userId }
+        });
       } catch (e) {
         console.error("[SYNC ERROR] Failed to delete session from Firestore:", e);
       }
@@ -254,7 +299,7 @@ export default function App() {
         console.log("[SYNC] Saving session to Firestore:", modifiedSession.id);
         await fetch("/api/sessions", {
           method: "POST",
-          headers: { "Content-Type": "application/json" },
+          headers: headers,
           body: JSON.stringify(modifiedSession)
         });
       } catch (e) {
@@ -278,9 +323,13 @@ export default function App() {
     
     // Save to backend Firestore
     try {
+      const userId = user ? user.uid : "guest";
       await fetch("/api/folders", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { 
+          "Content-Type": "application/json",
+          "x-user-id": userId
+        },
         body: JSON.stringify(newFolder)
       });
     } catch (e) {
@@ -303,8 +352,10 @@ export default function App() {
   const handleSynthesizeFolder = async (folderId: string) => {
     setIsSynthesizingFolder(true);
     try {
+      const userId = user ? user.uid : "guest";
       const response = await fetch(`/api/folders/${folderId}/synthesize`, {
-        method: "POST"
+        method: "POST",
+        headers: { "x-user-id": userId }
       });
       if (response.ok) {
         const updatedFolder = await response.json();
@@ -463,9 +514,13 @@ This workspace was custom-curated in **⚡ Turbo Fast-Track Mode** to bypass bro
       // Start simulator parallel with real server fetch to make the experience cinematic
       const delayPromise = simulateLoadingStages(!payload.isSample);
       
+      const userId = user ? user.uid : "guest";
       const fetchPromise = fetch("/api/process", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { 
+          "Content-Type": "application/json",
+          "x-user-id": userId
+        },
         body: JSON.stringify(payload)
       });
 
@@ -547,8 +602,10 @@ This workspace was custom-curated in **⚡ Turbo Fast-Track Mode** to bypass bro
       // Start the merge/OCR simulation stages to run concurrently during server-side processing
       const delayPromise = simulateMergeStages(isPdf);
 
+      const userId = user ? user.uid : "guest";
       const fetchPromise = fetch("/api/upload-file", {
         method: "POST",
+        headers: { "x-user-id": userId },
         body: formData
       });
 
@@ -816,10 +873,61 @@ This workspace was custom-curated in **⚡ Turbo Fast-Track Mode** to bypass bro
             )}
           </div>
           <div className="flex items-center gap-3">
+            {user ? (
+              <div className="flex items-center gap-2.5">
+                <div className="flex flex-col text-right hidden md:flex">
+                  <span className="text-[11px] font-bold text-slate-800 leading-none">{user.displayName || "Usuario"}</span>
+                  <span className="text-[9px] text-slate-400 font-semibold mt-0.5 leading-none">{user.email}</span>
+                </div>
+                {user.photoURL ? (
+                  <img src={user.photoURL} alt={user.displayName || ""} className="w-8 h-8 rounded-full border border-slate-200" />
+                ) : (
+                  <div className="w-8 h-8 rounded-full bg-indigo-100 text-indigo-700 font-bold flex items-center justify-center text-xs border border-indigo-200">
+                    {user.displayName ? user.displayName[0].toUpperCase() : "U"}
+                  </div>
+                )}
+                <button
+                  onClick={async () => {
+                    if (confirm("¿Estás seguro de que deseas cerrar sesión?")) {
+                      const activeAuth = await initFirebase();
+                      if (activeAuth) {
+                        await signOut(activeAuth);
+                        setSessions([]);
+                        setActiveSessionId(null);
+                        setFolders([]);
+                      }
+                    }
+                  }}
+                  className="px-2.5 py-1.5 text-[10px] font-bold text-slate-500 hover:text-rose-600 bg-slate-50 hover:bg-rose-50 border border-slate-200 hover:border-rose-200 rounded-lg transition cursor-pointer"
+                >
+                  Salir
+                </button>
+              </div>
+            ) : (
+              <button
+                onClick={async () => {
+                  try {
+                    setUploadError(null);
+                    const activeAuth = await initFirebase();
+                    if (activeAuth) {
+                      await signInWithPopup(activeAuth, googleProvider);
+                    }
+                  } catch (e: any) {
+                    console.error("Login failed:", e);
+                    setUploadError(`Error de inicio de sesión: ${e.message}`);
+                  }
+                }}
+                className="px-3.5 py-2 text-xs font-bold text-slate-700 bg-white border border-slate-200 hover:bg-slate-50 rounded-lg shadow-2xs transition flex items-center gap-1.5 cursor-pointer active:scale-95"
+              >
+                <img src="https://www.gstatic.com/firebasejs/ui/2.0.0/images/auth/google.svg" alt="Google" className="w-3.5 h-3.5" />
+                Iniciar sesión con Google
+              </button>
+            )}
+
             {activeSession && (
               <button 
                 onClick={() => setActiveSessionId(null)}
-                className="px-4 py-2 text-xs font-semibold text-white bg-indigo-600 hover:bg-indigo-700 rounded-lg shadow-2xs transition"
+                className="px-4 py-2 text-xs font-semibold text-white bg-indigo-600 hover:bg-indigo-700 rounded-lg shadow-2xs transition cursor-pointer"
               >
                 Analyze New
               </button>

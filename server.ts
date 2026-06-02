@@ -453,6 +453,15 @@ app.get("/api/health", (req, res) => {
   });
 });
 
+// Config endpoint for client-side Firebase Auth initialization
+app.get("/api/config", (req, res) => {
+  res.json({
+    apiKey: process.env.GEMINI_API_KEY || "",
+    authDomain: `${process.env.GOOGLE_CLOUD_PROJECT || "plaud-own"}.firebaseapp.com`,
+    projectId: process.env.GOOGLE_CLOUD_PROJECT || "plaud-own",
+  });
+});
+
 // 2. Chat with your Study buddy endpoint
 app.post("/api/chat", async (req, res) => {
   try {
@@ -901,6 +910,8 @@ app.post("/api/upload-file", upload.single("file"), async (req, res) => {
     const cleanMime = mimeType.split(";")[0].trim();
     console.log(`[MULTIPART UPLOAD] processing: Name: ${mediaName}, Mime: ${mimeType} (cleaned: ${cleanMime}), Size: ${Math.round(file.size / 1024 / 1024)}MB`);
 
+    const userId = (req.headers["x-user-id"] || "guest") as string;
+
     // Pre-generate session ID and upload file to GCS under tenant account
     const sessionId = "sess_" + Date.now().toString(36);
     const gcsDestination = `audios/${sessionId}_${mediaName}`;
@@ -1049,6 +1060,7 @@ app.post("/api/upload-file", upload.single("file"), async (req, res) => {
     // Wrap in local identity and return
     const formattedResult = {
       id: sessionId,
+      userId: userId, // Attach User ID
       createdAt: new Date().toISOString(),
       mediaType: mediaType || (mimeType.includes("pdf") ? "pdf" : "audio"),
       mediaName: mediaName,
@@ -1117,6 +1129,8 @@ app.post("/api/merge-chunks", async (req, res) => {
       res.status(400).json({ error: "Missing merge parameters: uploadId, fileName, or totalChunks." });
       return;
     }
+
+    const userId = (req.headers["x-user-id"] || "guest") as string;
 
     const chunkDir = path.join("/tmp", "chunks", uploadId);
     const mergedFilePath = path.join("/tmp", `${uploadId}_${fileName}`);
@@ -1286,6 +1300,7 @@ app.post("/api/merge-chunks", async (req, res) => {
 
     const formattedResult = {
       id: sessionId,
+      userId: userId, // Attach User ID
       createdAt: new Date().toISOString(),
       mediaType: mediaType || (mimeType.includes("pdf") ? "pdf" : "audio"),
       mediaName: fileName,
@@ -1311,16 +1326,21 @@ app.post("/api/merge-chunks", async (req, res) => {
 
 // --- FIRESTORE DATABASE ROUTES ---
 
-// 1. Get all saved study sessions from Firestore
+// 1. Get all saved study sessions from Firestore (partitioned by User ID)
 app.get("/api/sessions", async (req, res, next) => {
   try {
-    console.log("[FIRESTORE] Fetching all sessions from database...");
-    const snapshot = await firestore.collection("sessions").orderBy("createdAt", "desc").get();
+    const userId = (req.headers["x-user-id"] || "guest") as string;
+    console.log(`[FIRESTORE] Fetching sessions for user: ${userId}...`);
+    const snapshot = await firestore
+      .collection("sessions")
+      .where("userId", "==", userId)
+      .orderBy("createdAt", "desc")
+      .get();
     const sessions: any[] = [];
     snapshot.forEach(doc => {
       sessions.push(doc.data());
     });
-    console.log(`[FIRESTORE] Successfully fetched ${sessions.length} sessions.`);
+    console.log(`[FIRESTORE] Successfully fetched ${sessions.length} sessions for user ${userId}.`);
     res.json(sessions);
   } catch (error: any) {
     console.error("[FIRESTORE ERROR] Failed to fetch sessions:", error);
@@ -1328,16 +1348,18 @@ app.get("/api/sessions", async (req, res, next) => {
   }
 });
 
-// 2. Save or update a study session in Firestore
+// 2. Save or update a study session in Firestore (partitioned by User ID)
 app.post("/api/sessions", async (req, res, next) => {
   try {
     const session = req.body;
+    const userId = (req.headers["x-user-id"] || "guest") as string;
     if (!session || !session.id) {
       res.status(400).json({ error: "Session data with a valid id is required" });
       return;
     }
-    console.log(`[FIRESTORE] Saving session: ${session.id} ("${session.title || 'Untitled'}")`);
-    await firestore.collection("sessions").doc(session.id).set(session);
+    const updatedSession = { ...session, userId: userId };
+    console.log(`[FIRESTORE] Saving session: ${session.id} ("${session.title || 'Untitled'}") for user: ${userId}`);
+    await firestore.collection("sessions").doc(session.id).set(updatedSession);
     console.log(`[FIRESTORE] Successfully saved session ${session.id}.`);
     res.json({ success: true, id: session.id });
   } catch (error: any) {
@@ -1346,16 +1368,25 @@ app.post("/api/sessions", async (req, res, next) => {
   }
 });
 
-// 3. Delete a study session from Firestore
+// 3. Delete a study session from Firestore (with ownership check)
 app.delete("/api/sessions/:id", async (req, res, next) => {
   try {
     const { id } = req.params;
+    const userId = (req.headers["x-user-id"] || "guest") as string;
     if (!id) {
       res.status(400).json({ error: "Session id is required" });
       return;
     }
-    console.log(`[FIRESTORE] Deleting session: ${id}`);
-    await firestore.collection("sessions").doc(id).delete();
+    console.log(`[FIRESTORE] Deleting session: ${id} for user: ${userId}`);
+    
+    const docRef = firestore.collection("sessions").doc(id);
+    const doc = await docRef.get();
+    if (doc.exists && doc.data()?.userId !== userId) {
+      res.status(403).json({ error: "Forbidden: You do not own this session" });
+      return;
+    }
+
+    await docRef.delete();
     console.log(`[FIRESTORE] Successfully deleted session ${id}.`);
     res.json({ success: true });
   } catch (error: any) {
@@ -1364,16 +1395,21 @@ app.delete("/api/sessions/:id", async (req, res, next) => {
   }
 });
 
-// 4. Stream private audio/media from GCS securely
+// 4. Stream private audio/media from GCS securely (with ownership check)
 app.get("/api/sessions/:id/media", async (req, res, next) => {
   try {
     const { id } = req.params;
+    const userId = (req.headers["x-user-id"] || req.query.userId || "guest") as string;
     const doc = await firestore.collection("sessions").doc(id).get();
     if (!doc.exists) {
       res.status(404).json({ error: "Session not found" });
       return;
     }
     const session = doc.data();
+    if (session?.userId && session.userId !== userId) {
+      res.status(403).json({ error: "Forbidden: Access denied to this media file" });
+      return;
+    }
     if (!session || !session.gcsUri) {
       res.status(404).json({ error: "No media file associated with this session" });
       return;
@@ -1398,16 +1434,21 @@ app.get("/api/sessions/:id/media", async (req, res, next) => {
 
 // --- TEMA (FOLDERS) MANAGEMENT ROUTES ---
 
-// 1. Get all folders from Firestore
+// 1. Get all folders from Firestore (partitioned by User ID)
 app.get("/api/folders", async (req, res, next) => {
   try {
-    console.log("[FIRESTORE] Fetching all folders...");
-    const snapshot = await firestore.collection("folders").orderBy("createdAt", "desc").get();
+    const userId = (req.headers["x-user-id"] || "guest") as string;
+    console.log(`[FIRESTORE] Fetching folders for user: ${userId}...`);
+    const snapshot = await firestore
+      .collection("folders")
+      .where("userId", "==", userId)
+      .orderBy("createdAt", "desc")
+      .get();
     const folders: any[] = [];
     snapshot.forEach(doc => {
       folders.push(doc.data());
     });
-    console.log(`[FIRESTORE] Successfully fetched ${folders.length} folders.`);
+    console.log(`[FIRESTORE] Successfully fetched ${folders.length} folders for user ${userId}.`);
     res.json(folders);
   } catch (error: any) {
     console.error("[FIRESTORE ERROR] Failed to fetch folders:", error);
@@ -1415,16 +1456,18 @@ app.get("/api/folders", async (req, res, next) => {
   }
 });
 
-// 2. Create or update a folder
+// 2. Create or update a folder (partitioned by User ID)
 app.post("/api/folders", async (req, res, next) => {
   try {
     const folder = req.body;
+    const userId = (req.headers["x-user-id"] || "guest") as string;
     if (!folder || !folder.id || !folder.name) {
       res.status(400).json({ error: "Folder data with valid id and name is required" });
       return;
     }
-    console.log(`[FIRESTORE] Saving folder: ${folder.id} ("${folder.name}")`);
-    await firestore.collection("folders").doc(folder.id).set(folder);
+    const updatedFolder = { ...folder, userId: userId };
+    console.log(`[FIRESTORE] Saving folder: ${folder.id} ("${folder.name}") for user: ${userId}`);
+    await firestore.collection("folders").doc(folder.id).set(updatedFolder);
     console.log(`[FIRESTORE] Successfully saved folder ${folder.id}.`);
     res.json({ success: true, id: folder.id });
   } catch (error: any) {
@@ -1433,18 +1476,30 @@ app.post("/api/folders", async (req, res, next) => {
   }
 });
 
-// 3. Delete a folder (does NOT delete sessions inside, just un-assigns their folderId)
+// 3. Delete a folder (with ownership check)
 app.delete("/api/folders/:id", async (req, res, next) => {
   try {
     const { id } = req.params;
+    const userId = (req.headers["x-user-id"] || "guest") as string;
     if (!id) {
       res.status(400).json({ error: "Folder id is required" });
       return;
     }
-    console.log(`[FIRESTORE] Deleting folder: ${id}`);
+    console.log(`[FIRESTORE] Deleting folder: ${id} for user: ${userId}`);
     
-    // Un-assign sessions belonging to this folder
-    const sessionsSnapshot = await firestore.collection("sessions").where("folderId", "==", id).get();
+    // Ownership check
+    const folderDoc = await firestore.collection("folders").doc(id).get();
+    if (folderDoc.exists && folderDoc.data()?.userId !== userId) {
+      res.status(403).json({ error: "Forbidden: You do not own this folder" });
+      return;
+    }
+
+    // Un-assign sessions belonging to this folder and user
+    const sessionsSnapshot = await firestore
+      .collection("sessions")
+      .where("userId", "==", userId)
+      .where("folderId", "==", id)
+      .get();
     const batch = firestore.batch();
     sessionsSnapshot.forEach(doc => {
       batch.update(doc.ref, { folderId: null });
@@ -1460,25 +1515,30 @@ app.delete("/api/folders/:id", async (req, res, next) => {
   }
 });
 
-// 4. Synthesize all meetings in a folder (NotebookLM-style folder-wide AI intelligence!)
+// 4. Synthesize all meetings in a folder (partitioned by User ID)
 app.post("/api/folders/:id/synthesize", async (req, res, next) => {
   try {
     const { id } = req.params;
+    const userId = (req.headers["x-user-id"] || "guest") as string;
     const folderDoc = await firestore.collection("folders").doc(id).get();
     if (!folderDoc.exists) {
       res.status(404).json({ error: "Folder not found" });
       return;
     }
     const folder = folderDoc.data();
-    if (!folder) {
-      res.status(404).json({ error: "Folder content is empty" });
+    if (folder?.userId !== userId) {
+      res.status(403).json({ error: "Forbidden: You do not own this folder" });
       return;
     }
 
-    console.log(`[AI SYNTHESIS] Starting folder synthesis for folder ${id} ("${folder.name}")...`);
+    console.log(`[AI SYNTHESIS] Starting folder synthesis for folder ${id} ("${folder.name}") for user: ${userId}...`);
     
-    // Load all sessions belonging to this folder
-    const sessionsSnapshot = await firestore.collection("sessions").where("folderId", "==", id).get();
+    // Load all sessions belonging to this folder and user
+    const sessionsSnapshot = await firestore
+      .collection("sessions")
+      .where("userId", "==", userId)
+      .where("folderId", "==", id)
+      .get();
     const sessions: any[] = [];
     sessionsSnapshot.forEach(doc => {
       sessions.push(doc.data());
