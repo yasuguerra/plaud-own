@@ -40,6 +40,16 @@ export interface StudySession {
   mindMap: MindMapNode;
   flashcards: Flashcard[];
   chatHistory: ChatMessage[];
+  folderId?: string | null; // Topic folder ID association
+  gcsUri?: string;           // Google Cloud Storage private URI
+}
+
+export interface TopicFolder {
+  id: string;
+  name: string;
+  createdAt: string;
+  aiSynthesis?: string;
+  synthesizedAt?: string;
 }
 
 export interface ProcessingStatus {

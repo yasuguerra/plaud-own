@@ -19,10 +19,12 @@ import {
   Activity, 
   Workflow, 
   Moon, 
-  AlertCircle 
+  AlertCircle,
+  FolderHeart,
+  FolderTree
 } from "lucide-react";
 
-import { StudySession, ProcessingStatus, ActionItem, Flashcard, ChatMessage } from "./types";
+import { StudySession, ProcessingStatus, ActionItem, Flashcard, ChatMessage, TopicFolder } from "./types";
 import AudioRecorder from "./components/AudioRecorder";
 import ActionItemsList from "./components/ActionItemsList";
 import FlashcardsDeck from "./components/FlashcardsDeck";
@@ -148,6 +150,12 @@ export default function App() {
   const [uploadError, setUploadError] = useState<string | null>(null);
   const [isCopingSummary, setIsCopingSummary] = useState(false);
 
+  // Folder/Tema management states
+  const [folders, setFolders] = useState<TopicFolder[]>([]);
+  const [activeFolderId, setActiveFolderId] = useState<string | null>(null);
+  const [isSynthesizingFolder, setIsSynthesizingFolder] = useState(false);
+  const [selectedSynthesisFolderId, setSelectedSynthesisFolderId] = useState<string | null>(null);
+
   // Ingestion Tabs & Inputs state for high-capacity files handling and simulation
   const [activeIngestTab, setActiveIngestTab] = useState<"upload" | "paste" | "simulate">("upload");
   const [pastedTitle, setPastedTitle] = useState("");
@@ -155,20 +163,56 @@ export default function App() {
   const [simTopic, setSimTopic] = useState("");
   const [simMediaType, setSimMediaType] = useState<"audio" | "video">("audio");
 
-  // Load sessions from localStorage on mount
+  // Load sessions from Firestore backend on mount (falling back to localStorage)
   useEffect(() => {
-    const saved = localStorage.getItem("study_buddy_sessions");
-    if (saved) {
+    const loadSessions = async () => {
       try {
-        const parsed = JSON.parse(saved);
-        setSessions(parsed);
-        if (parsed.length > 0) {
-          setActiveSessionId(parsed[0].id);
+        const response = await fetch("/api/sessions");
+        if (response.ok) {
+          const parsed = await response.json();
+          console.log("[SYNC] Loaded sessions from Firestore:", parsed.length);
+          setSessions(parsed);
+          if (parsed.length > 0) {
+            setActiveSessionId(parsed[0].id);
+          }
+          // Also sync to local storage as a quick backup
+          localStorage.setItem("study_buddy_sessions", JSON.stringify(parsed));
+          return;
         }
       } catch (e) {
-        console.error("Failed to parse saved study sessions", e);
+        console.warn("[SYNC WARNING] Failed to load sessions from Firestore backend, trying localStorage", e);
       }
-    }
+
+      // Local storage fallback
+      const saved = localStorage.getItem("study_buddy_sessions");
+      if (saved) {
+        try {
+          const parsed = JSON.parse(saved);
+          setSessions(parsed);
+          if (parsed.length > 0) {
+            setActiveSessionId(parsed[0].id);
+          }
+        } catch (e) {
+          console.error("Failed to parse saved study sessions", e);
+        }
+      }
+    };
+
+    const loadFolders = async () => {
+      try {
+        const response = await fetch("/api/folders");
+        if (response.ok) {
+          const parsed = await response.json();
+          console.log("[SYNC] Loaded folders from Firestore:", parsed.length);
+          setFolders(parsed);
+        }
+      } catch (e) {
+        console.error("Failed to load folders from Firestore:", e);
+      }
+    };
+
+    loadSessions();
+    loadFolders();
 
     // Check backend API key configuration status
     fetch("/api/health")
@@ -181,10 +225,100 @@ export default function App() {
       });
   }, []);
 
-  // Save sessions to localStorage on updates
-  const saveSessions = (updatedList: StudySession[]) => {
+  // Save sessions to localStorage and sync with Firestore backend
+  const saveSessions = async (updatedList: StudySession[]) => {
+    // 1. Instantly update local react state and localStorage for fast/responsive UI
     setSessions(updatedList);
     localStorage.setItem("study_buddy_sessions", JSON.stringify(updatedList));
+
+    // 2. Determine if there's any deleted session
+    const deletedSession = sessions.find(s => !updatedList.some(u => u.id === s.id));
+    if (deletedSession) {
+      try {
+        console.log("[SYNC] Deleting session from Firestore:", deletedSession.id);
+        await fetch(`/api/sessions/${deletedSession.id}`, { method: "DELETE" });
+      } catch (e) {
+        console.error("[SYNC ERROR] Failed to delete session from Firestore:", e);
+      }
+      return;
+    }
+
+    // 3. Determine if there's any new or modified session
+    const modifiedSession = updatedList.find(u => {
+      const original = sessions.find(s => s.id === u.id);
+      return !original || JSON.stringify(original) !== JSON.stringify(u);
+    });
+
+    if (modifiedSession) {
+      try {
+        console.log("[SYNC] Saving session to Firestore:", modifiedSession.id);
+        await fetch("/api/sessions", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(modifiedSession)
+        });
+      } catch (e) {
+        console.error("[SYNC ERROR] Failed to save session to Firestore:", e);
+      }
+    }
+  };
+
+  // --- FOLDERS (TEMAS) MANAGEMENT FUNCTIONS ---
+
+  const handleCreateFolder = async (name: string) => {
+    if (!name.trim()) return;
+    const newFolder: TopicFolder = {
+      id: "folder_" + Date.now().toString(36),
+      name: name.trim(),
+      createdAt: new Date().toISOString()
+    };
+    
+    // Save to local React state
+    setFolders([newFolder, ...folders]);
+    
+    // Save to backend Firestore
+    try {
+      await fetch("/api/folders", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(newFolder)
+      });
+    } catch (e) {
+      console.error("Failed to save folder to Firestore:", e);
+    }
+  };
+
+  const handleMoveSessionToFolder = async (sessionId: string, folderId: string | null) => {
+    const updatedSessions = sessions.map(s => {
+      if (s.id === sessionId) {
+        return { ...s, folderId: folderId };
+      }
+      return s;
+    });
+    
+    // This will automatically save it to Firestore via our existing saveSessions!
+    await saveSessions(updatedSessions);
+  };
+
+  const handleSynthesizeFolder = async (folderId: string) => {
+    setIsSynthesizingFolder(true);
+    try {
+      const response = await fetch(`/api/folders/${folderId}/synthesize`, {
+        method: "POST"
+      });
+      if (response.ok) {
+        const updatedFolder = await response.json();
+        setFolders(folders.map(f => f.id === folderId ? updatedFolder : f));
+        setSelectedSynthesisFolderId(folderId);
+      } else {
+        const errData = await response.json();
+        alert(errData.error || "Failed to synthesize folder.");
+      }
+    } catch (e) {
+      console.error("Failed to synthesize folder:", e);
+    } finally {
+      setIsSynthesizingFolder(false);
+    }
   };
 
   const getActiveSession = (): StudySession | undefined => {
@@ -395,7 +529,7 @@ This workspace was custom-curated in **⚡ Turbo Fast-Track Mode** to bypass bro
     setUploadError(null);
     setProcessingStatus({ stage: "uploading", progress: 10, message: "Uploading asset to central workspace..." });
 
-    const isAudio = file.type.startsWith("audio/") || file.name.endsWith(".mp3") || file.name.endsWith(".wav") || file.name.endsWith(".m4a");
+    const isAudio = file.type.startsWith("audio/") || file.name.endsWith(".mp3") || file.name.endsWith(".wav") || file.name.endsWith(".m4a") || file.name.endsWith(".ogg");
     const isVideo = file.type.startsWith("video/") || file.name.endsWith(".mp4") || file.name.endsWith(".webm") || file.name.endsWith(".mov");
     const isPdf = file.type === "application/pdf" || file.name.endsWith(".pdf");
     const isText = file.type.startsWith("text/") || file.name.endsWith(".txt") || file.name.endsWith(".md") || file.name.endsWith(".csv");
@@ -478,13 +612,13 @@ This workspace was custom-curated in **⚡ Turbo Fast-Track Mode** to bypass bro
   };
 
   const handleFileInput = (file: File) => {
-    const isAudio = file.type.startsWith("audio/") || file.name.endsWith(".mp3") || file.name.endsWith(".wav") || file.name.endsWith(".m4a");
+    const isAudio = file.type.startsWith("audio/") || file.name.endsWith(".mp3") || file.name.endsWith(".wav") || file.name.endsWith(".m4a") || file.name.endsWith(".ogg");
     const isVideo = file.type.startsWith("video/") || file.name.endsWith(".mp4") || file.name.endsWith(".webm") || file.name.endsWith(".mov");
     const isPdf = file.type === "application/pdf" || file.name.endsWith(".pdf");
     const isText = file.type.startsWith("text/") || file.name.endsWith(".txt") || file.name.endsWith(".md") || file.name.endsWith(".csv");
 
     if (!isAudio && !isVideo && !isPdf && !isText) {
-      setUploadError("Unsupported format. Please select an audio, video, PDF, or text document (.txt, .md, .pdf, .mp3, .wav, .mp4, .m4a).");
+      setUploadError("Unsupported format. Please select an audio, video, PDF, or text document (.txt, .md, .pdf, .mp3, .wav, .m4a, .ogg, .mp4).");
       return;
     }
 
@@ -651,6 +785,24 @@ This workspace was custom-curated in **⚡ Turbo Fast-Track Mode** to bypass bro
                 <span className="bg-indigo-50 text-indigo-600 text-[10px] px-2 py-0.5 rounded border border-indigo-100 font-medium shrink-0">
                   {activeSession.mediaType === "video" ? "Video Processed" : "Audio Processed"}
                 </span>
+                
+                {/* Topic Folder Move Selector */}
+                <select
+                  value={activeSession.folderId || ""}
+                  onChange={(e) => {
+                    const val = e.target.value === "" ? null : e.target.value;
+                    handleMoveSessionToFolder(activeSession.id, val);
+                  }}
+                  className="bg-slate-50 border border-slate-200 text-slate-700 text-[10px] font-bold px-2 py-1 rounded-md cursor-pointer transition focus:outline-hidden hover:bg-slate-100"
+                  title="Asignar Tema de Reunión"
+                >
+                  <option value="">📂 Sin Tema (General)</option>
+                  {folders.map(f => (
+                    <option key={f.id} value={f.id}>
+                      📂 {f.name}
+                    </option>
+                  ))}
+                </select>
               </>
             ) : (
               <>
@@ -810,10 +962,109 @@ This workspace was custom-curated in **⚡ Turbo Fast-Track Mode** to bypass bro
                 </div>
               </div>
 
+              {/* Topic Folders (Temas) widget */}
+              <div className="border-t border-slate-100 pt-5 space-y-4">
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-1.5">
+                    <FolderTree className="h-4 w-4 text-indigo-500" />
+                    <span className="text-[10px] font-bold uppercase text-slate-400 tracking-wider">Temas de Reunión</span>
+                  </div>
+                  <button 
+                    onClick={() => {
+                      const name = prompt("Ingrese el nombre del nuevo Tema:");
+                      if (name && name.trim()) handleCreateFolder(name);
+                    }}
+                    className="text-[10px] font-bold text-indigo-600 hover:text-indigo-800 transition flex items-center gap-0.5"
+                  >
+                    + Nuevo
+                  </button>
+                </div>
+
+                <div className="flex flex-col gap-1.5 max-h-[140px] overflow-y-auto pr-1">
+                  <button
+                    onClick={() => setActiveFolderId(null)}
+                    className={`text-left text-xs font-semibold px-2.5 py-1.5 rounded-lg transition flex items-center justify-between ${
+                      activeFolderId === null 
+                        ? "bg-indigo-50 text-indigo-700" 
+                        : "text-slate-600 hover:bg-slate-50"
+                    }`}
+                  >
+                    <span className="truncate">📂 Todos los Temas</span>
+                    <span className="text-[10px] text-slate-400">({sessions.length})</span>
+                  </button>
+
+                  {folders.map(folder => {
+                    const folderSessions = sessions.filter(s => s.folderId === folder.id);
+                    const isSelected = activeFolderId === folder.id;
+                    return (
+                      <button
+                        key={folder.id}
+                        onClick={() => setActiveFolderId(folder.id)}
+                        className={`text-left text-xs font-semibold px-2.5 py-1.5 rounded-lg transition flex items-center justify-between ${
+                          isSelected 
+                            ? "bg-indigo-50 text-indigo-700" 
+                            : "text-slate-600 hover:bg-slate-50"
+                        }`}
+                      >
+                        <span className="truncate">📂 {folder.name}</span>
+                        <span className="text-[10px] text-slate-400">({folderSessions.length})</span>
+                      </button>
+                    );
+                  })}
+                </div>
+
+                {/* AI Folder Curation Widget */}
+                {activeFolderId && (() => {
+                  const currentFolder = folders.find(f => f.id === activeFolderId);
+                  if (!currentFolder) return null;
+                  const folderSessions = sessions.filter(s => s.folderId === currentFolder.id);
+
+                  return (
+                    <div className="border border-indigo-100 bg-indigo-50/40 p-4 rounded-xl space-y-2.5">
+                      <div className="flex items-center justify-between">
+                        <h4 className="font-bold text-slate-800 text-[10px] uppercase tracking-wider">Inteligencia de Tema</h4>
+                        <span className="text-[8px] text-indigo-600 bg-indigo-100/60 px-2 py-0.5 rounded-full font-bold">Activo</span>
+                      </div>
+                      <p className="text-[10px] text-slate-500 leading-relaxed font-semibold">
+                        Combina los resúmenes de las {folderSessions.length} reuniones de este tema para obtener un informe consolidado por la IA.
+                      </p>
+
+                      {currentFolder.aiSynthesis ? (
+                        <button
+                          onClick={() => {
+                            setSelectedSynthesisFolderId(currentFolder.id);
+                          }}
+                          className="w-full bg-white border border-indigo-150 text-indigo-700 text-[10px] font-bold py-1.5 rounded-lg hover:bg-indigo-100/30 transition flex items-center justify-center gap-1 shadow-2xs cursor-pointer"
+                        >
+                          📖 Leer Síntesis de Tema con IA
+                        </button>
+                      ) : (
+                        <button
+                          disabled={folderSessions.length === 0 || isSynthesizingFolder}
+                          onClick={() => handleSynthesizeFolder(currentFolder.id)}
+                          className="w-full bg-indigo-600 text-white text-[10px] font-bold py-1.5 rounded-lg hover:bg-indigo-700 transition flex items-center justify-center gap-1 disabled:opacity-50 disabled:cursor-not-allowed cursor-pointer"
+                        >
+                          {isSynthesizingFolder ? (
+                            <>
+                              <Loader2 className="h-3 w-3 animate-spin text-white" />
+                              Sintetizando Tema...
+                            </>
+                          ) : (
+                            <>
+                              ✨ Sintetizar Tema con IA
+                            </>
+                          )}
+                        </button>
+                      )}
+                    </div>
+                  );
+                })()}
+              </div>
+
               {/* Saved Study Library list widget */}
               <div className="border-t border-slate-100 pt-5 mt-auto">
                 <SidebarHistory 
-                  sessions={sessions} 
+                  sessions={activeFolderId ? sessions.filter(s => s.folderId === activeFolderId) : sessions} 
                   activeSessionId={activeSessionId}
                   onSelectSession={(id) => { setActiveSessionId(id); setActiveTab("summary"); }}
                   onDeleteSession={handleDeleteSession}
@@ -1257,6 +1508,52 @@ This workspace was custom-curated in **⚡ Turbo Fast-Track Mode** to bypass bro
 
           </section>
         )}
+
+        {/* AI Topic Synthesis Overlay Modal */}
+        {selectedSynthesisFolderId && (() => {
+          const folder = folders.find(f => f.id === selectedSynthesisFolderId);
+          if (!folder) return null;
+          return (
+            <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-xs flex items-center justify-center p-4 z-50 animate-fade-in font-sans">
+              <div className="bg-white rounded-2xl border border-slate-200 shadow-xl max-w-2xl w-full h-[80vh] flex flex-col p-6 space-y-4">
+                <div className="flex items-center justify-between border-b border-slate-100 pb-3 shrink-0">
+                  <div className="flex items-center gap-2">
+                    <Sparkles className="h-5 w-5 text-indigo-500 animate-pulse" />
+                    <div>
+                      <h3 className="font-bold text-slate-800 text-sm">Síntesis Inteligente: {folder.name}</h3>
+                      <p className="text-[10px] text-slate-400 font-semibold">Reporte consolidado generado con Gemini Enterprise</p>
+                    </div>
+                  </div>
+                  <button 
+                    onClick={() => setSelectedSynthesisFolderId(null)}
+                    className="text-slate-400 hover:text-slate-600 font-bold text-sm cursor-pointer"
+                  >
+                    ✕
+                  </button>
+                </div>
+                
+                <div className="flex-1 overflow-y-auto pr-1 text-xs text-slate-700 leading-relaxed font-sans prose max-w-none">
+                  <div className="whitespace-pre-wrap bg-slate-50 border border-slate-100 p-4 rounded-xl font-medium font-sans">
+                    {folder.aiSynthesis}
+                  </div>
+                </div>
+                
+                <div className="flex items-center justify-between pt-3 border-t border-slate-100 shrink-0">
+                  <span className="text-[9px] text-slate-400 font-semibold uppercase">
+                    Generado el: {folder.synthesizedAt ? new Date(folder.synthesizedAt).toLocaleDateString() : ""}
+                  </span>
+                  <button
+                    onClick={() => handleSynthesizeFolder(folder.id)}
+                    disabled={isSynthesizingFolder}
+                    className="bg-indigo-600 hover:bg-indigo-700 text-white font-bold text-[10px] py-1.5 px-4 rounded-lg transition cursor-pointer"
+                  >
+                    {isSynthesizingFolder ? "Sintetizando..." : "🔄 Volver a sintetizar"}
+                  </button>
+                </div>
+              </div>
+            </div>
+          );
+        })()}
 
       </main>
     </div>

@@ -5,11 +5,52 @@ import dotenv from "dotenv";
 import { GoogleGenAI, Type } from "@google/genai";
 import { createServer as createViteServer } from "vite";
 import multer from "multer";
+import { Firestore } from "@google-cloud/firestore";
+import { Storage } from "@google-cloud/storage";
 
+// Explicitly override host environment variables with .env configuration
 dotenv.config();
+if (fs.existsSync(".env")) {
+  try {
+    const envConfig = dotenv.parse(fs.readFileSync(".env"));
+    for (const k in envConfig) {
+      process.env[k] = envConfig[k];
+    }
+  } catch (e) {
+    console.warn("Failed to manually parse .env", e);
+  }
+}
+
+// Initialize Firestore Database connection
+const firestore = new Firestore({
+  projectId: process.env.GOOGLE_CLOUD_PROJECT || "plaud-own",
+});
+
+// Initialize Cloud Storage connection
+const storage = new Storage({
+  projectId: process.env.GOOGLE_CLOUD_PROJECT || "plaud-own",
+});
+const BUCKET_NAME = "plaud-own-media-assets";
+
+async function uploadToGCS(filePath: string, destination: string, mimeType: string): Promise<string> {
+  try {
+    console.log(`[GCS] Uploading ${filePath} to gs://${BUCKET_NAME}/${destination}...`);
+    await storage.bucket(BUCKET_NAME).upload(filePath, {
+      destination: destination,
+      metadata: {
+        contentType: mimeType,
+      }
+    });
+    console.log(`[GCS] Upload completed successfully.`);
+    return `gs://${BUCKET_NAME}/${destination}`;
+  } catch (err) {
+    console.error("[GCS ERROR] Failed to upload to GCS:", err);
+    return "";
+  }
+}
 
 const app = express();
-const PORT = process.env.PORT || 3000;
+const PORT = Number(process.env.PORT) || 3000;
 
 // Configure multer to store uploaded files in /tmp/
 const upload = multer({
@@ -50,23 +91,29 @@ function getGeminiClient(): GoogleGenAI {
   // Safe trimming and stripping of literal surrounding quotes if any
   apiKey = apiKey.trim().replace(/^['"]|['"]$/g, "").trim();
 
-  console.log(`[GEMINI CLIENT INIT] RAW Env key length: ${(process.env.GEMINI_API_KEY || "").length}`);
-  console.log(`[GEMINI CLIENT INIT] Cleaned API Key length: ${apiKey.length}`);
-  console.log(`[GEMINI CLIENT INIT] Starts with 'AIzaSy': ${apiKey.startsWith("AIzaSy")}`);
-  console.log(`[GEMINI CLIENT INIT] Contains spaces or tabs: ${/\s/.test(apiKey)}`);
-  console.log(`[GEMINI CLIENT INIT] Same as placeholder: ${apiKey === "MY_GEMINI_API_KEY"}`);
+  const isPlaceholder = !apiKey || apiKey === "MY_GEMINI_API_KEY" || apiKey === "YOUR_GEMINI_API_KEY" || apiKey.trim() === "";
 
-  if (!apiKey || apiKey === "MY_GEMINI_API_KEY" || apiKey.trim() === "") {
-    throw new Error("GEMINI_API_KEY is not configured. Please add your key in Settings > Secrets to enable actual media transcription and map rendering.");
-  }
-  aiClient = new GoogleGenAI({
-    apiKey: apiKey,
-    httpOptions: {
-      headers: {
-        "User-Agent": "aistudio-build",
+  if (!isPlaceholder) {
+    console.log("[GEMINI CLIENT INIT] Authenticating using provided GEMINI_API_KEY.");
+    aiClient = new GoogleGenAI({
+      apiKey: apiKey,
+      httpOptions: {
+        headers: {
+          "User-Agent": "aistudio-build",
+        }
       }
-    }
-  });
+    });
+  } else {
+    console.log("[GEMINI CLIENT INIT] No API Key configured. Authenticating using Application Default Credentials (ADC) or Google Cloud Identity...");
+    // Fallback to Google Gen AI with no api key, which resolves to local credentials or active GCP service account
+    aiClient = new GoogleGenAI({
+      httpOptions: {
+        headers: {
+          "User-Agent": "aistudio-build",
+        }
+      }
+    });
+  }
   return aiClient;
 }
 
@@ -854,6 +901,11 @@ app.post("/api/upload-file", upload.single("file"), async (req, res) => {
     const cleanMime = mimeType.split(";")[0].trim();
     console.log(`[MULTIPART UPLOAD] processing: Name: ${mediaName}, Mime: ${mimeType} (cleaned: ${cleanMime}), Size: ${Math.round(file.size / 1024 / 1024)}MB`);
 
+    // Pre-generate session ID and upload file to GCS under tenant account
+    const sessionId = "sess_" + Date.now().toString(36);
+    const gcsDestination = `audios/${sessionId}_${mediaName}`;
+    const gcsUri = await uploadToGCS(tempFilePath, gcsDestination, cleanMime);
+
     const ai = getGeminiClient();
     let contentsPayload: any[] = [];
 
@@ -996,10 +1048,11 @@ app.post("/api/upload-file", upload.single("file"), async (req, res) => {
 
     // Wrap in local identity and return
     const formattedResult = {
-      id: "sess_" + Date.now().toString(36),
+      id: sessionId,
       createdAt: new Date().toISOString(),
       mediaType: mediaType || (mimeType.includes("pdf") ? "pdf" : "audio"),
       mediaName: mediaName,
+      gcsUri: gcsUri, // Store GCS URI
       ...parsedStudySession,
       chatHistory: [
         {
@@ -1095,6 +1148,11 @@ app.post("/api/merge-chunks", async (req, res) => {
 
     const fileStats = fs.statSync(mergedFilePath);
     console.log(`[MERGE DONE] reassembled at: ${mergedFilePath}, final size: ${Math.round(fileStats.size / 1024 / 1024)}MB`);
+
+    // Pre-generate session ID and upload reassembled file to GCS under tenant account
+    const sessionId = "sess_" + Date.now().toString(36);
+    const gcsDestination = `audios/${sessionId}_${fileName}`;
+    const gcsUri = await uploadToGCS(mergedFilePath, gcsDestination, mimeType || "");
 
     // Proactively clean up chunk folder
     try {
@@ -1227,10 +1285,11 @@ app.post("/api/merge-chunks", async (req, res) => {
     }
 
     const formattedResult = {
-      id: "sess_" + Date.now().toString(36),
+      id: sessionId,
       createdAt: new Date().toISOString(),
       mediaType: mediaType || (mimeType.includes("pdf") ? "pdf" : "audio"),
       mediaName: fileName,
+      gcsUri: gcsUri, // Store GCS URI
       ...parsedStudySession,
       chatHistory: [
         {
@@ -1247,6 +1306,250 @@ app.post("/api/merge-chunks", async (req, res) => {
   } catch (error: any) {
     console.warn("[CHUNK ASSEMBLY PROCESS ERROR] Failed to process reassembled file:", error);
     res.status(500).json({ error: cleanErrorMessage(error) });
+  }
+});
+
+// --- FIRESTORE DATABASE ROUTES ---
+
+// 1. Get all saved study sessions from Firestore
+app.get("/api/sessions", async (req, res, next) => {
+  try {
+    console.log("[FIRESTORE] Fetching all sessions from database...");
+    const snapshot = await firestore.collection("sessions").orderBy("createdAt", "desc").get();
+    const sessions: any[] = [];
+    snapshot.forEach(doc => {
+      sessions.push(doc.data());
+    });
+    console.log(`[FIRESTORE] Successfully fetched ${sessions.length} sessions.`);
+    res.json(sessions);
+  } catch (error: any) {
+    console.error("[FIRESTORE ERROR] Failed to fetch sessions:", error);
+    next(error);
+  }
+});
+
+// 2. Save or update a study session in Firestore
+app.post("/api/sessions", async (req, res, next) => {
+  try {
+    const session = req.body;
+    if (!session || !session.id) {
+      res.status(400).json({ error: "Session data with a valid id is required" });
+      return;
+    }
+    console.log(`[FIRESTORE] Saving session: ${session.id} ("${session.title || 'Untitled'}")`);
+    await firestore.collection("sessions").doc(session.id).set(session);
+    console.log(`[FIRESTORE] Successfully saved session ${session.id}.`);
+    res.json({ success: true, id: session.id });
+  } catch (error: any) {
+    console.error("[FIRESTORE ERROR] Failed to save session:", error);
+    next(error);
+  }
+});
+
+// 3. Delete a study session from Firestore
+app.delete("/api/sessions/:id", async (req, res, next) => {
+  try {
+    const { id } = req.params;
+    if (!id) {
+      res.status(400).json({ error: "Session id is required" });
+      return;
+    }
+    console.log(`[FIRESTORE] Deleting session: ${id}`);
+    await firestore.collection("sessions").doc(id).delete();
+    console.log(`[FIRESTORE] Successfully deleted session ${id}.`);
+    res.json({ success: true });
+  } catch (error: any) {
+    console.error("[FIRESTORE ERROR] Failed to delete session:", error);
+    next(error);
+  }
+});
+
+// 4. Stream private audio/media from GCS securely
+app.get("/api/sessions/:id/media", async (req, res, next) => {
+  try {
+    const { id } = req.params;
+    const doc = await firestore.collection("sessions").doc(id).get();
+    if (!doc.exists) {
+      res.status(404).json({ error: "Session not found" });
+      return;
+    }
+    const session = doc.data();
+    if (!session || !session.gcsUri) {
+      res.status(404).json({ error: "No media file associated with this session" });
+      return;
+    }
+
+    const uri = session.gcsUri; // e.g. gs://plaud-own-media-assets/audios/sess_xxx_filename.mp3
+    const pathInBucket = uri.replace(`gs://${BUCKET_NAME}/`, "");
+
+    console.log(`[GCS STREAM] Streaming media for session ${id} from gs://${BUCKET_NAME}/${pathInBucket}`);
+    const file = storage.bucket(BUCKET_NAME).file(pathInBucket);
+
+    const [metadata] = await file.getMetadata();
+    res.setHeader("Content-Type", metadata.contentType || "audio/mpeg");
+    res.setHeader("Content-Length", metadata.size);
+
+    file.createReadStream().pipe(res);
+  } catch (error: any) {
+    console.error("[GCS STREAM ERROR] Failed to stream file from GCS:", error);
+    next(error);
+  }
+});
+
+// --- TEMA (FOLDERS) MANAGEMENT ROUTES ---
+
+// 1. Get all folders from Firestore
+app.get("/api/folders", async (req, res, next) => {
+  try {
+    console.log("[FIRESTORE] Fetching all folders...");
+    const snapshot = await firestore.collection("folders").orderBy("createdAt", "desc").get();
+    const folders: any[] = [];
+    snapshot.forEach(doc => {
+      folders.push(doc.data());
+    });
+    console.log(`[FIRESTORE] Successfully fetched ${folders.length} folders.`);
+    res.json(folders);
+  } catch (error: any) {
+    console.error("[FIRESTORE ERROR] Failed to fetch folders:", error);
+    next(error);
+  }
+});
+
+// 2. Create or update a folder
+app.post("/api/folders", async (req, res, next) => {
+  try {
+    const folder = req.body;
+    if (!folder || !folder.id || !folder.name) {
+      res.status(400).json({ error: "Folder data with valid id and name is required" });
+      return;
+    }
+    console.log(`[FIRESTORE] Saving folder: ${folder.id} ("${folder.name}")`);
+    await firestore.collection("folders").doc(folder.id).set(folder);
+    console.log(`[FIRESTORE] Successfully saved folder ${folder.id}.`);
+    res.json({ success: true, id: folder.id });
+  } catch (error: any) {
+    console.error("[FIRESTORE ERROR] Failed to save folder:", error);
+    next(error);
+  }
+});
+
+// 3. Delete a folder (does NOT delete sessions inside, just un-assigns their folderId)
+app.delete("/api/folders/:id", async (req, res, next) => {
+  try {
+    const { id } = req.params;
+    if (!id) {
+      res.status(400).json({ error: "Folder id is required" });
+      return;
+    }
+    console.log(`[FIRESTORE] Deleting folder: ${id}`);
+    
+    // Un-assign sessions belonging to this folder
+    const sessionsSnapshot = await firestore.collection("sessions").where("folderId", "==", id).get();
+    const batch = firestore.batch();
+    sessionsSnapshot.forEach(doc => {
+      batch.update(doc.ref, { folderId: null });
+    });
+    await batch.commit();
+
+    await firestore.collection("folders").doc(id).delete();
+    console.log(`[FIRESTORE] Successfully deleted folder ${id} and un-assigned its sessions.`);
+    res.json({ success: true });
+  } catch (error: any) {
+    console.error("[FIRESTORE ERROR] Failed to delete folder:", error);
+    next(error);
+  }
+});
+
+// 4. Synthesize all meetings in a folder (NotebookLM-style folder-wide AI intelligence!)
+app.post("/api/folders/:id/synthesize", async (req, res, next) => {
+  try {
+    const { id } = req.params;
+    const folderDoc = await firestore.collection("folders").doc(id).get();
+    if (!folderDoc.exists) {
+      res.status(404).json({ error: "Folder not found" });
+      return;
+    }
+    const folder = folderDoc.data();
+    if (!folder) {
+      res.status(404).json({ error: "Folder content is empty" });
+      return;
+    }
+
+    console.log(`[AI SYNTHESIS] Starting folder synthesis for folder ${id} ("${folder.name}")...`);
+    
+    // Load all sessions belonging to this folder
+    const sessionsSnapshot = await firestore.collection("sessions").where("folderId", "==", id).get();
+    const sessions: any[] = [];
+    sessionsSnapshot.forEach(doc => {
+      sessions.push(doc.data());
+    });
+
+    if (sessions.length === 0) {
+      res.status(400).json({ error: "No meetings or conversations found in this topic folder to synthesize." });
+      return;
+    }
+
+    console.log(`[AI SYNTHESIS] Found ${sessions.length} sessions to analyze.`);
+
+    // Build a comprehensive, grounded text representation of all documents/meetings
+    let crossMeetingContent = "";
+    sessions.forEach((s, idx) => {
+      crossMeetingContent += `\n--- MEETING #${idx + 1}: ${s.title || s.mediaName} ---\n`;
+      crossMeetingContent += `Date/Time: ${s.createdAt}\n`;
+      crossMeetingContent += `Summary/Resume:\n${s.summary || 'No summary'}\n`;
+      if (s.actionItems && Array.isArray(s.actionItems)) {
+        crossMeetingContent += `Action Items:\n`;
+        s.actionItems.forEach((item: any) => {
+          crossMeetingContent += `- [${item.importance || 'medium'}] ${item.task} (Assigned to: ${item.assignee || 'Unassigned'})\n`;
+        });
+      }
+      crossMeetingContent += `\n`;
+    });
+
+    const prompt = `You are a world-class Corporate Knowledge Architect. You are analyzing a "Topic Folder" containing ${sessions.length} interconnected meetings and corporate files about: "${folder.name}".
+
+Please read the provided summaries, timelines, and decision frameworks below. Synthesize a unified, comprehensive, and consolidated cross-meeting corporate intelligence report.
+
+=== CROSS-MEETING KNOWLEDGE DATASET ===
+${crossMeetingContent}
+=== END CROSS-MEETING KNOWLEDGE DATASET ===
+
+Your consolidated report MUST include:
+1. **Executive Overview**: A unified, high-level synthesis of what this entire topic is about, what progress has been made, and the strategic direction.
+2. **Major Thematic Pillars**: Consolidate key themes, decisions, and alignments across different meetings into clear, logical subsections.
+3. **Consolidated Action Matrix**: A unified master checklist of follow-ups across all sessions, listing the task, priority, and suggested owner, removing any redundant duplicates.
+4. **Chronological Evolution & Timeline**: Outline how decisions or discussions have evolved over time (from the oldest meeting to the newest).
+5. **Gaps and Critical Risks**: Highlight any unresolved issues, conflicts of interest, missing timelines, or potential risks that need executive attention.
+
+Write the entire intelligence report in a professional, beautiful, and highly dense Markdown format. Use clear subheadings, list structures, and bold accents.
+CRITICAL REQUIREMENT: You MUST automatically detect the language used in the source sessions (e.g. Spanish, English). Write the entire report strictly in that detected language (for example, if the input meetings are in Spanish, the entire report must be in Spanish).`;
+
+    console.log(`[AI SYNTHESIS] Dispatching compilation request to Gemini for folder "${folder.name}"...`);
+    const ai = getGeminiClient();
+    const response = await ai.models.generateContent({
+      model: "gemini-3.5-flash",
+      contents: [{ text: prompt }],
+      config: {
+        temperature: 0.2
+      }
+    });
+
+    const parsedText = response.text || "Failed to generate cross-meeting intelligence.";
+    
+    // Save the synthesis to the folder document
+    const updatedFolder = {
+      ...folder,
+      aiSynthesis: parsedText,
+      synthesizedAt: new Date().toISOString()
+    };
+    
+    await firestore.collection("folders").doc(id).set(updatedFolder);
+    console.log(`[AI SYNTHESIS] Folder "${folder.name}" successfully synthesized and saved.`);
+    res.json(updatedFolder);
+
+  } catch (error: any) {
+    console.error("[AI SYNTHESIS ERROR] Folder synthesis failed:", error);
+    next(error);
   }
 });
 
