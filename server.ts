@@ -94,24 +94,18 @@ function getGeminiClient(): GoogleGenAI {
   const isPlaceholder = !apiKey || apiKey === "MY_GEMINI_API_KEY" || apiKey === "YOUR_GEMINI_API_KEY" || apiKey.trim() === "";
 
   if (!isPlaceholder) {
-    console.log("[GEMINI CLIENT INIT] Authenticating using provided GEMINI_API_KEY.");
+    console.log("[GEMINI CLIENT INIT] Authenticating using provided GEMINI_API_KEY and Vertex AI settings.");
     aiClient = new GoogleGenAI({
       apiKey: apiKey,
-      httpOptions: {
-        headers: {
-          "User-Agent": "aistudio-build",
-        }
-      }
+      project: process.env.GOOGLE_CLOUD_PROJECT || "plaud-own",
+      location: process.env.GOOGLE_CLOUD_LOCATION || "us-central1"
     });
   } else {
-    console.log("[GEMINI CLIENT INIT] No API Key configured. Authenticating using Application Default Credentials (ADC) or Google Cloud Identity...");
+    console.log("[GEMINI CLIENT INIT] No API Key configured. Authenticating using Application Default Credentials (ADC) and Vertex AI settings...");
     // Fallback to Google Gen AI with no api key, which resolves to local credentials or active GCP service account
     aiClient = new GoogleGenAI({
-      httpOptions: {
-        headers: {
-          "User-Agent": "aistudio-build",
-        }
-      }
+      project: process.env.GOOGLE_CLOUD_PROJECT || "plaud-own",
+      location: process.env.GOOGLE_CLOUD_LOCATION || "us-central1"
     });
   }
   return aiClient;
@@ -509,7 +503,7 @@ Guidelines:
     });
 
     const response = await ai.models.generateContent({
-      model: "gemini-3.5-flash",
+      model: "gemini-1.5-flash",
       contents: formattedContents,
       config: {
         systemInstruction: systemInstruction,
@@ -796,7 +790,7 @@ app.post("/api/process", async (req, res) => {
     }
 
     const response = await ai.models.generateContent({
-      model: "gemini-3.5-flash",
+      model: "gemini-1.5-flash",
       contents: contentsPayload,
       config: {
         responseMimeType: "application/json",
@@ -970,7 +964,7 @@ app.post("/api/upload-file", upload.single("file"), async (req, res) => {
 
     console.log("Generating study companion from Gemini...");
     const response = await ai.models.generateContent({
-      model: "gemini-3.5-flash",
+      model: "gemini-1.5-flash",
       contents: contentsPayload,
       config: {
         responseMimeType: "application/json",
@@ -1183,7 +1177,7 @@ app.post("/api/merge-chunks", async (req, res) => {
 
     console.log("Generating study companion from Gemini on reassembled dataset...");
     const response = await ai.models.generateContent({
-      model: "gemini-3.5-flash",
+      model: "gemini-1.5-flash",
       contents: contentsPayload,
       config: {
         responseMimeType: "application/json",
@@ -1500,7 +1494,7 @@ CRITICAL REQUIREMENT: You MUST automatically detect the language used in the sou
     console.log(`[AI SYNTHESIS] Dispatching compilation request to Gemini for folder "${folder.name}"...`);
     const ai = getGeminiClient();
     const response = await ai.models.generateContent({
-      model: "gemini-3.5-flash",
+      model: "gemini-1.5-flash",
       contents: [{ text: prompt }],
       config: {
         temperature: 0.2
