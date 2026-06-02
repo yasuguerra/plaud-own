@@ -30,7 +30,7 @@ const firestore = new Firestore({
 const storage = new Storage({
   projectId: process.env.GOOGLE_CLOUD_PROJECT || "plaud-own",
 });
-const BUCKET_NAME = "plaud-own-media-assets";
+const BUCKET_NAME = "plaud-own-media";
 
 async function uploadToGCS(filePath: string, destination: string, mimeType: string): Promise<string> {
   try {
@@ -749,31 +749,27 @@ app.post("/api/process", async (req, res) => {
           }
         ];
       } else {
-        // Fall back to File API for extremely heavy direct uploads
-        console.log(`Using File API for heavy direct upload...`);
+        // Fall back to GCS and Vertex AI for heavier uploaded files to bypass Files API limits completely!
+        console.log(`Using GCS fallback for direct uploads...`);
         let safeName = (mediaName || "user_upload").replace(/[^a-zA-Z0-9.-]/g, "_");
         if (!safeName.includes(".")) {
           const ext = getExtensionFromMimeType(cleanMime);
           safeName = `${safeName}.${ext}`;
         }
         const tempFilePath = path.join("/tmp", `${Date.now()}_${safeName}`);
-        let uploadResult;
-
+        
+        let gcsUri = "";
         try {
           const buffer = Buffer.from(base64Data, "base64");
           fs.writeFileSync(tempFilePath, buffer);
           console.log(`Temp file written to: ${tempFilePath} (${buffer.length} bytes)`);
 
-          uploadResult = await ai.files.upload({
-            file: tempFilePath,
-            config: {
-              mimeType: cleanMime,
-            }
-          });
-          console.log(`Gemini File API Upload successful. name: ${uploadResult.name}, uri: ${uploadResult.uri}`);
+          const sessionId = "sess_" + Date.now().toString(36);
+          const gcsDestination = `audios/${sessionId}_${safeName}`;
+          gcsUri = await uploadToGCS(tempFilePath, gcsDestination, cleanMime);
         } catch (uploadError: any) {
-          console.error("Gemini File API Upload failed:", uploadError);
-          res.status(400).json({ error: `Failed to upload multimedia file to Gemini: ${cleanErrorMessage(uploadError)}` });
+          console.error("GCS Upload failed:", uploadError);
+          res.status(400).json({ error: `Failed to upload multimedia file to Cloud Storage: ${cleanErrorMessage(uploadError)}` });
           return;
         } finally {
           try {
@@ -785,25 +781,11 @@ app.post("/api/process", async (req, res) => {
           }
         }
 
-        // Check if file is still in the PROCESSING state and poll until ACTIVE
-        let fileRef = await ai.files.get({ name: uploadResult.name });
-        let attempts = 0;
-        while (fileRef.state === "PROCESSING" && attempts < 90) { // wait up to 3 minutes
-          console.log(`File is PROCESSING. State: ${fileRef.state}. Waiting 2 seconds...`);
-          await new Promise((resolve) => setTimeout(resolve, 2000));
-          fileRef = await ai.files.get({ name: uploadResult.name });
-          attempts++;
-        }
-
-        if (fileRef.state === "FAILED") {
-          throw new Error("Uploaded media file processing failed under Gemini File Engine.");
-        }
-
         contentsPayload = [
           {
             fileData: {
-              fileUri: fileRef.uri,
-              mimeType: fileRef.mimeType,
+              fileUri: gcsUri,
+              mimeType: cleanMime,
             }
           },
           {
@@ -943,62 +925,15 @@ app.post("/api/upload-file", upload.single("file"), async (req, res) => {
         Make sure the mindMap structure is complete, featuring colorful, helpful levels of root topic, sub-topic, and subtopic children details.`
       }];
     } else {
-      // PDF or Audio or Video
-      let uploadResult;
-      
-      // Ensure the file has a proper extension matching cleanMime so Gemini can parse it robustly
-      let uploadPath = tempFilePath;
-      if (!tempFilePath.includes(".")) {
-        const ext = getExtensionFromMimeType(cleanMime);
-        uploadPath = `${tempFilePath}.${ext}`;
-        try {
-          fs.copyFileSync(tempFilePath, uploadPath);
-        } catch (copyErr) {
-          console.error("Failed to copy temp file with extension suffix:", copyErr);
-          uploadPath = tempFilePath;
-        }
-      }
-
+      // PDF or Audio or Video - Process natively via Vertex AI from GCS Uri
+      // Clean up the local temp file since it is now uploaded to GCS securely!
       try {
-        console.log(`Uploading heavy bin/document/multimedia file to Gemini File API using path: ${uploadPath}...`);
-        uploadResult = await ai.files.upload({
-          file: uploadPath,
-          config: {
-            mimeType: cleanMime,
-          }
-        });
-        console.log(`Gemini File API Upload successful. name: ${uploadResult.name}, uri: ${uploadResult.uri}`);
-      } catch (uploadError: any) {
-        console.error("Gemini File API Upload failed:", uploadError);
-        res.status(400).json({ error: `Failed to upload file to Gemini File API: ${cleanErrorMessage(uploadError)}` });
-        return;
-      } finally {
-        // Clean up both path variants immediately
-        try {
-          if (fs.existsSync(tempFilePath)) {
-            fs.unlinkSync(tempFilePath);
-          }
-          if (uploadPath !== tempFilePath && fs.existsSync(uploadPath)) {
-            fs.unlinkSync(uploadPath);
-          }
-          console.log(`Cleaned up temp multipart files`);
-        } catch (cleanupErr) {
-          console.error("Failed to delete temp files:", cleanupErr);
+        if (fs.existsSync(tempFilePath)) {
+          fs.unlinkSync(tempFilePath);
         }
-      }
-
-      // Check if file is still in the PROCESSING state and poll until ACTIVE (essential for video/audio, PDFs are usually fast)
-      let fileRef = await ai.files.get({ name: uploadResult.name });
-      let attempts = 0;
-      while (fileRef.state === "PROCESSING" && attempts < 90) { // wait up to 3 minutes
-        console.log(`File processing in Gemini. State: ${fileRef.state}. Waiting 2s...`);
-        await new Promise((resolve) => setTimeout(resolve, 2000));
-        fileRef = await ai.files.get({ name: uploadResult.name });
-        attempts++;
-      }
-
-      if (fileRef.state === "FAILED") {
-        throw new Error("Uploaded media document processing failed under Gemini File Engine.");
+        console.log(`[GCS PROCESO] Temp file cleaned up. Processing via GCS URI: ${gcsUri}`);
+      } catch (cleanupErr) {
+        console.error("Failed to delete temp file:", cleanupErr);
       }
 
       let contentPromptText = "";
@@ -1013,8 +948,8 @@ app.post("/api/upload-file", upload.single("file"), async (req, res) => {
       contentsPayload = [
         {
           fileData: {
-            fileUri: fileRef.uri,
-            mimeType: fileRef.mimeType,
+            fileUri: gcsUri,
+            mimeType: cleanMime,
           }
         },
         {
@@ -1203,43 +1138,15 @@ app.post("/api/merge-chunks", async (req, res) => {
         Make sure the mindMap structure is complete, featuring colorful, helpful levels of root topic, sub-topic, and subtopic children details.`
       }];
     } else {
-      let uploadResult;
+      // PDF or Audio or Video - Process natively via Vertex AI from GCS Uri
+      // Clean up the local temp merged file since it is now uploaded to GCS securely!
       try {
-        console.log(`Uploading reassembled heavy file to Gemini File API...`);
-        uploadResult = await ai.files.upload({
-          file: mergedFilePath,
-          config: {
-            mimeType: mimeType,
-          }
-        });
-        console.log(`Gemini File API Upload successful. name: ${uploadResult.name}, uri: ${uploadResult.uri}`);
-      } catch (uploadError: any) {
-        console.error("Gemini File API Upload failed for reassembled file:", uploadError);
-        res.status(400).json({ error: `Failed to upload file to Gemini File API: ${cleanErrorMessage(uploadError)}` });
-        return;
-      } finally {
-        try {
-          if (fs.existsSync(mergedFilePath)) {
-            fs.unlinkSync(mergedFilePath);
-            console.log(`Cleaned up temp merged file: ${mergedFilePath}`);
-          }
-        } catch (cleanupErr) {
-          console.error("Failed to clean up temp merged file post-upload:", cleanupErr);
+        if (fs.existsSync(mergedFilePath)) {
+          fs.unlinkSync(mergedFilePath);
+          console.log(`[GCS REENSAMBLADO] Temp merged file cleaned up. Processing via GCS URI: ${gcsUri}`);
         }
-      }
-
-      // Wait if document/media status is still PROCESSING in the cloud
-      let fileRef = await ai.files.get({ name: uploadResult.name });
-      let attempts = 0;
-      while (fileRef.state === "PROCESSING" && attempts < 90) { // wait up to 3 minutes
-        console.log(`Reassembled heavy asset processing in Gemini. State: ${fileRef.state}. Waiting 2s...`);
-        await new Promise((resolve) => setTimeout(resolve, 2000));
-        fileRef = await ai.files.get({ name: uploadResult.name });
-        attempts++;
-      }
-
-      if (fileRef.state === "FAILED") {
-        throw new Error("Reassembled heavy document processing failed under Gemini File Engine.");
+      } catch (cleanupErr) {
+        console.error("Failed to clean up temp merged file post-upload:", cleanupErr);
       }
 
       let contentPromptText = "";
@@ -1254,8 +1161,8 @@ app.post("/api/merge-chunks", async (req, res) => {
       contentsPayload = [
         {
           fileData: {
-            fileUri: fileRef.uri,
-            mimeType: fileRef.mimeType,
+            fileUri: gcsUri,
+            mimeType: mimeType,
           }
         },
         {
@@ -1334,12 +1241,15 @@ app.get("/api/sessions", async (req, res, next) => {
     const snapshot = await firestore
       .collection("sessions")
       .where("userId", "==", userId)
-      .orderBy("createdAt", "desc")
       .get();
     const sessions: any[] = [];
     snapshot.forEach(doc => {
       sessions.push(doc.data());
     });
+    
+    // Sort in memory by createdAt descending to avoid requiring composite indexes in Firestore
+    sessions.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+    
     console.log(`[FIRESTORE] Successfully fetched ${sessions.length} sessions for user ${userId}.`);
     res.json(sessions);
   } catch (error: any) {
@@ -1442,12 +1352,15 @@ app.get("/api/folders", async (req, res, next) => {
     const snapshot = await firestore
       .collection("folders")
       .where("userId", "==", userId)
-      .orderBy("createdAt", "desc")
       .get();
     const folders: any[] = [];
     snapshot.forEach(doc => {
       folders.push(doc.data());
     });
+    
+    // Sort in memory by createdAt descending to avoid requiring composite indexes in Firestore
+    folders.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+    
     console.log(`[FIRESTORE] Successfully fetched ${folders.length} folders for user ${userId}.`);
     res.json(folders);
   } catch (error: any) {
@@ -1609,6 +1522,49 @@ CRITICAL REQUIREMENT: You MUST automatically detect the language used in the sou
 
   } catch (error: any) {
     console.error("[AI SYNTHESIS ERROR] Folder synthesis failed:", error);
+    next(error);
+  }
+});
+
+// --- USER PROFILE ROUTES ---
+
+// 1. Get user profile details from Firestore
+app.get("/api/users/profile", async (req, res, next) => {
+  try {
+    const userId = (req.headers["x-user-id"] || "guest") as string;
+    console.log(`[FIRESTORE] Fetching profile for user: ${userId}...`);
+    const doc = await firestore.collection("users").doc(userId).get();
+    if (doc.exists) {
+      res.json(doc.data());
+    } else {
+      res.json({ uid: userId, companyName: "" });
+    }
+  } catch (error: any) {
+    console.error("[FIRESTORE ERROR] Failed to fetch user profile:", error);
+    next(error);
+  }
+});
+
+// 2. Save or update user profile details in Firestore
+app.post("/api/users/profile", async (req, res, next) => {
+  try {
+    const userId = (req.headers["x-user-id"] || "guest") as string;
+    const profile = req.body;
+    if (!profile) {
+      res.status(400).json({ error: "Profile data is required" });
+      return;
+    }
+    const updatedProfile = { 
+      ...profile, 
+      uid: userId,
+      updatedAt: new Date().toISOString()
+    };
+    console.log(`[FIRESTORE] Saving profile for user: ${userId}`);
+    await firestore.collection("users").doc(userId).set(updatedProfile, { merge: true });
+    console.log(`[FIRESTORE] Successfully saved profile for user ${userId}.`);
+    res.json(updatedProfile);
+  } catch (error: any) {
+    console.error("[FIRESTORE ERROR] Failed to save user profile:", error);
     next(error);
   }
 });

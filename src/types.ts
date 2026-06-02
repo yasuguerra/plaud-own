@@ -57,3 +57,11 @@ export interface ProcessingStatus {
   progress: number;
   message: string;
 }
+
+export interface UserProfile {
+  uid: string;
+  email: string;
+  displayName: string;
+  companyName?: string;
+  updatedAt?: string;
+}

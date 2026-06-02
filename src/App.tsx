@@ -21,7 +21,9 @@ import {
   Moon, 
   AlertCircle,
   FolderHeart,
-  FolderTree
+  FolderTree,
+  Settings,
+  Building
 } from "lucide-react";
 
 import { StudySession, ProcessingStatus, ActionItem, Flashcard, ChatMessage, TopicFolder } from "./types";
@@ -162,6 +164,11 @@ export default function App() {
   const [user, setUser] = useState<User | null>(null);
   const [authLoading, setAuthLoading] = useState(true);
 
+  // Settings and Profile states
+  const [isSettingsOpen, setIsSettingsOpen] = useState(false);
+  const [companyName, setCompanyName] = useState("");
+  const [savingProfile, setSavingProfile] = useState(false);
+
   // Ingestion Tabs & Inputs state for high-capacity files handling and simulation
   const [activeIngestTab, setActiveIngestTab] = useState<"upload" | "paste" | "simulate">("upload");
   const [pastedTitle, setPastedTitle] = useState("");
@@ -247,8 +254,22 @@ export default function App() {
       }
     };
 
+    const loadProfile = async () => {
+      try {
+        const response = await fetch("/api/users/profile", { headers });
+        if (response.ok) {
+          const parsed = await response.json();
+          console.log(`[SYNC] Loaded user profile for ${userId}:`, parsed);
+          setCompanyName(parsed.companyName || "");
+        }
+      } catch (e) {
+        console.error("Failed to load user profile:", e);
+      }
+    };
+
     loadSessions();
     loadFolders();
+    loadProfile();
 
     // Check backend API key configuration status
     fetch("/api/health")
@@ -369,6 +390,35 @@ export default function App() {
       console.error("Failed to synthesize folder:", e);
     } finally {
       setIsSynthesizingFolder(false);
+    }
+  };
+
+  const handleSaveProfile = async (customCompanyName: string) => {
+    setSavingProfile(true);
+    try {
+      const userId = user ? user.uid : "guest";
+      const headers = { 
+        "Content-Type": "application/json",
+        "x-user-id": userId 
+      };
+      
+      const response = await fetch("/api/users/profile", {
+        method: "POST",
+        headers: headers,
+        body: JSON.stringify({ companyName: customCompanyName.trim() })
+      });
+      if (response.ok) {
+        const parsed = await response.json();
+        setCompanyName(parsed.companyName || "");
+        setIsSettingsOpen(false);
+        console.log("[SYNC] Saved user profile successfully:", parsed);
+      } else {
+        alert("Failed to save profile. Please try again.");
+      }
+    } catch (e) {
+      console.error("Failed to save profile to Firestore:", e);
+    } finally {
+      setSavingProfile(false);
     }
   };
 
@@ -789,6 +839,82 @@ This workspace was custom-curated in **⚡ Turbo Fast-Track Mode** to bypass bro
     setTimeout(() => setIsCopingSummary(false), 2000);
   };
 
+  if (authLoading) {
+    return (
+      <div className="flex h-screen w-full items-center justify-center bg-slate-50 font-sans text-slate-900">
+        <div className="flex flex-col items-center justify-center text-center space-y-4">
+          <Loader2 className="h-8 w-8 animate-spin text-indigo-600" />
+          <p className="text-xs text-slate-500 font-bold uppercase tracking-wider">Cargando Espacio Corporativo...</p>
+        </div>
+      </div>
+    );
+  }
+
+  if (!user) {
+    return (
+      <div className="flex h-screen w-full bg-slate-950 font-sans text-white overflow-hidden relative">
+        {/* Subtle grid mesh decoration */}
+        <div className="absolute inset-0 bg-[linear-gradient(to_right,#1f293710_1px,transparent_1px),linear-gradient(to_bottom,#1f293710_1px,transparent_1px)] bg-[size:4rem_4rem]" />
+        
+        {/* Decorative blur blobs */}
+        <div className="absolute top-1/4 -left-20 w-80 h-80 bg-indigo-600/10 rounded-full blur-3xl" />
+        <div className="absolute bottom-1/4 -right-20 w-80 h-80 bg-violet-600/10 rounded-full blur-3xl" />
+
+        <div className="flex-1 flex flex-col items-center justify-center p-6 text-center z-10">
+          <div className="max-w-md w-full space-y-8 bg-slate-900/40 border border-slate-800 p-8 md:p-10 rounded-3xl backdrop-blur-md shadow-2xl">
+            <div className="flex flex-col items-center space-y-3">
+              <div className="w-12 h-12 bg-indigo-600 rounded-2xl flex items-center justify-center text-white font-extrabold text-2xl shadow-lg shadow-indigo-600/20">
+                Σ
+              </div>
+              <h1 className="text-xl md:text-2xl font-display font-extrabold tracking-tight text-white mt-4">
+                PLAUD Corporate Intelligence
+              </h1>
+              <p className="text-[11px] font-bold text-indigo-400 uppercase tracking-widest bg-indigo-950/60 border border-indigo-900/60 px-3 py-1 rounded-full">
+                Workspace Multi-Tenant Activo
+              </p>
+            </div>
+
+            <p className="text-xs text-slate-400 leading-relaxed max-w-sm mx-auto">
+              Bienvenido al espacio de trabajo unificado. Inicia sesión con tu cuenta de Google para acceder a tus minutas privadas, almacenamiento seguro en la nube y síntesis de temas mediante IA.
+            </p>
+
+            {uploadError && (
+              <div className="p-3.5 rounded-xl bg-rose-950/40 border border-rose-900/40 text-rose-300 text-left text-xs font-medium leading-relaxed">
+                ⚠️ {uploadError}
+              </div>
+            )}
+
+            <div className="pt-2">
+              <button
+                onClick={async () => {
+                  try {
+                    setUploadError(null);
+                    const activeAuth = await initFirebase();
+                    if (activeAuth) {
+                      await signInWithPopup(activeAuth, googleProvider);
+                    }
+                  } catch (e: any) {
+                    console.error("Login failed:", e);
+                    setUploadError(`Error de inicio de sesión: ${e.message}`);
+                  }
+                }}
+                className="w-full py-3.5 px-4 bg-white hover:bg-slate-50 text-slate-800 font-extrabold text-xs rounded-xl shadow-lg transition duration-150 flex items-center justify-center gap-2.5 cursor-pointer active:scale-[0.98]"
+              >
+                <img src="https://www.gstatic.com/firebasejs/ui/2.0.0/images/auth/google.svg" alt="Google" className="w-4 h-4 shrink-0" />
+                Iniciar sesión con tu cuenta de Google
+              </button>
+            </div>
+
+            <div className="border-t border-slate-800/60 pt-6 flex items-center justify-between text-[10px] text-slate-500 font-semibold tracking-wider uppercase">
+              <span>Tenant: Plaud-own</span>
+              <span>GCP Firestore V2.1</span>
+            </div>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className="flex h-screen w-full bg-slate-50 font-sans text-slate-900 overflow-hidden">
       {/* Sidebar Navigation */}
@@ -833,7 +959,9 @@ This workspace was custom-curated in **⚡ Turbo Fast-Track Mode** to bypass bro
         {/* Header Bar */}
         <header className="h-16 bg-white border-b border-slate-200 px-8 flex items-center justify-between shrink-0">
           <div className="flex items-center gap-4 min-w-0">
-            <span className="text-xs font-semibold uppercase tracking-widest text-slate-400 hidden sm:inline">Current Project</span>
+            <span className="text-xs font-bold uppercase tracking-widest text-slate-400 hidden sm:inline">
+              {companyName ? `🏢 ${companyName}` : "🏢 Espacio Corporativo"}
+            </span>
             {activeSession ? (
               <>
                 <h1 className="text-sm md:text-base font-bold text-slate-800 truncate max-w-[200px] md:max-w-[340px]">
@@ -886,6 +1014,13 @@ This workspace was custom-curated in **⚡ Turbo Fast-Track Mode** to bypass bro
                     {user.displayName ? user.displayName[0].toUpperCase() : "U"}
                   </div>
                 )}
+                <button
+                  onClick={() => setIsSettingsOpen(true)}
+                  className="p-2 rounded-lg border border-slate-200 hover:bg-slate-50 text-slate-500 hover:text-indigo-600 transition cursor-pointer"
+                  title="Ajustes de Organización"
+                >
+                  <Settings className="h-4 w-4" />
+                </button>
                 <button
                   onClick={async () => {
                     if (confirm("¿Estás seguro de que deseas cerrar sesión?")) {
@@ -1662,6 +1797,98 @@ This workspace was custom-curated in **⚡ Turbo Fast-Track Mode** to bypass bro
             </div>
           );
         })()}
+
+        {/* Tenant Settings Overlay Modal */}
+        {isSettingsOpen && user && (
+          <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-xs flex items-center justify-center p-4 z-50 animate-fade-in font-sans">
+            <div className="bg-white rounded-2xl border border-slate-200 shadow-xl max-w-md w-full flex flex-col p-6 space-y-5">
+              <div className="flex items-center justify-between border-b border-slate-100 pb-3 shrink-0">
+                <div className="flex items-center gap-2 text-indigo-600">
+                  <Settings className="h-5 w-5" />
+                  <h3 className="font-bold text-slate-800 text-sm">Ajustes de Organización</h3>
+                </div>
+                <button 
+                  onClick={() => setIsSettingsOpen(false)}
+                  className="text-slate-400 hover:text-slate-600 font-bold text-sm cursor-pointer"
+                >
+                  ✕
+                </button>
+              </div>
+
+              <div className="space-y-4 text-xs text-slate-700 leading-relaxed font-sans overflow-y-auto">
+                {/* User Google Profile */}
+                <div className="bg-slate-50 border border-slate-100 p-4 rounded-xl flex items-center gap-3">
+                  {user.photoURL ? (
+                    <img src={user.photoURL} alt={user.displayName || ""} className="w-11 h-11 rounded-full border border-slate-200" />
+                  ) : (
+                    <div className="w-11 h-11 rounded-full bg-indigo-100 text-indigo-700 font-extrabold flex items-center justify-center text-sm border border-indigo-200">
+                      {user.displayName ? user.displayName[0].toUpperCase() : "U"}
+                    </div>
+                  )}
+                  <div>
+                    <h4 className="font-bold text-slate-850 text-xs leading-none">{user.displayName || "Usuario"}</h4>
+                    <p className="text-[10px] text-slate-400 font-semibold mt-1">{user.email}</p>
+                    <p className="text-[8px] text-slate-400 font-mono mt-0.5">UID: {user.uid}</p>
+                  </div>
+                </div>
+
+                {/* Edit Company/Workspace Name */}
+                <div className="flex flex-col gap-1.5">
+                  <label className="font-bold text-slate-600 uppercase tracking-wide text-[9px] flex items-center gap-1">
+                    <Building className="h-3.5 w-3.5 text-indigo-500" /> Nombre de Compañía / Organización
+                  </label>
+                  <input
+                    type="text"
+                    value={companyName}
+                    onChange={(e) => setCompanyName(e.target.value)}
+                    placeholder="e.g. Acme Corporation, Logística Global"
+                    className="w-full border border-slate-200 rounded-lg p-2.5 bg-slate-50 focus:bg-white focus:ring-1 focus:ring-indigo-500 font-bold text-slate-800 text-xs"
+                  />
+                  <span className="text-[9px] text-slate-400 leading-normal font-semibold">
+                    Este nombre se mostrará de forma destacada en la cabecera de tu espacio de trabajo privado.
+                  </span>
+                </div>
+
+                {/* GCP Tenant Resources (Read-Only auditing stats) */}
+                <div className="border border-slate-100 p-3.5 rounded-xl space-y-2 bg-slate-50/50">
+                  <h4 className="font-bold text-slate-800 text-[10px] uppercase tracking-wider">Recursos GCP Activos (Plaud-own)</h4>
+                  <div className="grid grid-cols-2 gap-2 text-[9px] font-semibold text-slate-500">
+                    <div>
+                      <span className="block text-[8px] text-slate-400 uppercase font-bold">Project ID</span>
+                      <span className="font-mono text-slate-700">plaud-own</span>
+                    </div>
+                    <div>
+                      <span className="block text-[8px] text-slate-400 uppercase font-bold">GCS Storage Bucket</span>
+                      <span className="font-mono text-slate-700">plaud-own-media-assets</span>
+                    </div>
+                    <div className="col-span-2">
+                      <span className="block text-[8px] text-slate-400 uppercase font-bold">Firestore NoSQL Database</span>
+                      <span className="font-mono text-slate-700">(default) - Native Mode</span>
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              <div className="flex items-center justify-end gap-2.5 pt-3 border-t border-slate-100 shrink-0">
+                <button
+                  type="button"
+                  onClick={() => setIsSettingsOpen(false)}
+                  className="px-3.5 py-2 text-xs font-bold text-slate-500 hover:text-slate-700 transition cursor-pointer bg-slate-105 bg-slate-100 rounded-lg"
+                >
+                  Cancelar
+                </button>
+                <button
+                  type="button"
+                  disabled={savingProfile}
+                  onClick={() => handleSaveProfile(companyName)}
+                  className="px-4 py-2 text-xs font-bold text-white bg-indigo-600 hover:bg-indigo-700 rounded-lg shadow-sm transition cursor-pointer disabled:opacity-50"
+                >
+                  {savingProfile ? "Guardando..." : "Guardar Cambios"}
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
 
       </main>
     </div>
