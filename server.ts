@@ -674,7 +674,9 @@ app.post("/api/process", async (req, res) => {
       5. A highly descriptive Mind Map concept hierarchy matching the MindMapNode schema structure.
       6. Five to seven highly engaging study flashcards testing main concept outcomes.
       
-      Generate fully populated and valid results in JSON format according to the supplied responseSchema.`;
+      Generate fully populated and valid results in JSON format according to the supplied responseSchema.
+      
+      CRITICAL REQUIREMENT: You MUST automatically detect the language spoken or written in the source audio/video/document (e.g. Spanish, English). All generated text fields (title, summary, transcript, actionItems, mindMap, flashcards) MUST be entirely in that detected language. Do not translate the content; write it fully in the detected language (for example, if the input is in Spanish, everything must be in Spanish).`;
 
       // Optimized Inline upload for fast processing and zero File API polling delays (< 15MB)
       if (rawSizeBytes < 15 * 1024 * 1024) {
@@ -799,7 +801,12 @@ app.post("/api/process", async (req, res) => {
     res.json(formattedResult);
 
   } catch (error: any) {
-    console.warn("[PROCESS ERROR] Initiating high-fidelity fallback study session:", error);
+    console.warn("[PROCESS ERROR] Initiating high-fidelity fallback or returning error:", error);
+    // If it's a real file upload or written text from the user, do NOT silently fall back to mock data!
+    if (!req.body.isSample && req.body.sampleType !== "custom") {
+      res.status(500).json({ error: cleanErrorMessage(error) });
+      return;
+    }
     try {
       const fallbackSession = getFallbackStudySession({
         sampleType: req.body.sampleType,
@@ -956,7 +963,9 @@ app.post("/api/upload-file", upload.single("file"), async (req, res) => {
           3. A complete timestamped narrative transcript or detailed chapter layout.
           4. Structured follow-up Action Items.
           5. A highly descriptive Mind Map concept hierarchy matching the MindMapNode schema structure.
-          6. Five to seven highly engaging study flashcards testing main concept outcomes.`
+          6. Five to seven highly engaging study flashcards testing main concept outcomes.
+          
+          CRITICAL REQUIREMENT: You MUST automatically detect the language spoken or written in the source audio/video/document (e.g. Spanish, English). All generated text fields (title, summary, transcript, actionItems, mindMap, flashcards) MUST be entirely in that detected language. Do not translate the content; write it fully in the detected language (for example, if the input is in Spanish, everything must be in Spanish).`
         }
       ];
     }
@@ -1005,33 +1014,8 @@ app.post("/api/upload-file", upload.single("file"), async (req, res) => {
     res.json(formattedResult);
 
   } catch (error: any) {
-    console.warn("[MULTIPART PROCESS ERROR] Initiating high-fidelity fallback study session:", error);
-    try {
-      const fName = req.file ? req.file.originalname : "Uploaded Document";
-      const mType = req.body.mediaType || "file";
-      const fallbackSession = getFallbackStudySession({
-        mediaName: fName,
-        mediaType: mType
-      });
-      const formattedResult = {
-        id: "sess_" + Date.now().toString(36),
-        createdAt: new Date().toISOString(),
-        mediaType: mType,
-        mediaName: fName,
-        ...fallbackSession,
-        chatHistory: [
-          {
-            id: "welcome_msg",
-            role: "model" as const,
-            content: `Hi there! I am your AI Study Companion. From your uploaded file **"${fName}"**, I have synthesized "${fallbackSession.title}". It features an academic summary, interactive mind map coordinate grid, checklist items, and active recall flashcards. Ask me anything or request a quiz!`,
-            timestamp: new Date().toISOString()
-          }
-        ]
-      };
-      res.json(formattedResult);
-    } catch (fallbackErr) {
-      res.status(500).json({ error: cleanErrorMessage(error) });
-    }
+    console.warn("[MULTIPART PROCESS ERROR] Failed to process real file:", error);
+    res.status(500).json({ error: cleanErrorMessage(error) });
   }
 });
 
@@ -1211,7 +1195,9 @@ app.post("/api/merge-chunks", async (req, res) => {
           3. A complete timestamped narrative transcript or detailed chapter layout.
           4. Structured follow-up Action Items.
           5. A highly descriptive Mind Map concept hierarchy matching the MindMapNode schema structure.
-          6. Five to seven highly engaging study flashcards testing main concept outcomes.`
+          6. Five to seven highly engaging study flashcards testing main concept outcomes.
+          
+          CRITICAL REQUIREMENT: You MUST automatically detect the language spoken or written in the source audio/video/document (e.g. Spanish, English). All generated text fields (title, summary, transcript, actionItems, mindMap, flashcards) MUST be entirely in that detected language. Do not translate the content; write it fully in the detected language (for example, if the input is in Spanish, everything must be in Spanish).`
         }
       ];
     }
@@ -1259,33 +1245,8 @@ app.post("/api/merge-chunks", async (req, res) => {
     res.json(formattedResult);
 
   } catch (error: any) {
-    console.warn("[CHUNK ASSEMBLY PROCESS ERROR] Initiating high-fidelity fallback study session:", error);
-    try {
-      const fName = req.body.fileName || "Uploaded Heavy Asset";
-      const mType = req.body.mediaType || "file";
-      const fallbackSession = getFallbackStudySession({
-        mediaName: fName,
-        mediaType: mType
-      });
-      const formattedResult = {
-        id: "sess_" + Date.now().toString(36),
-        createdAt: new Date().toISOString(),
-        mediaType: mType,
-        mediaName: fName,
-        ...fallbackSession,
-        chatHistory: [
-          {
-            id: "welcome_msg",
-            role: "model" as const,
-            content: `Hi there! I am your AI Study Companion. From your uploaded file **"${fName}"**, I have synthesized "${fallbackSession.title}". It features an academic summary, interactive mind map coordinate grid, checklist items, and active recall flashcards. Ask me anything or request a quiz!`,
-            timestamp: new Date().toISOString()
-          }
-        ]
-      };
-      res.json(formattedResult);
-    } catch (fallbackErr) {
-      res.status(500).json({ error: cleanErrorMessage(error) });
-    }
+    console.warn("[CHUNK ASSEMBLY PROCESS ERROR] Failed to process reassembled file:", error);
+    res.status(500).json({ error: cleanErrorMessage(error) });
   }
 });
 
