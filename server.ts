@@ -453,6 +453,9 @@ app.get("/api/config", (req, res) => {
     apiKey: process.env.FIREBASE_API_KEY || "",
     authDomain: `${process.env.GOOGLE_CLOUD_PROJECT || "plaud-own"}.firebaseapp.com`,
     projectId: process.env.GOOGLE_CLOUD_PROJECT || "plaud-own",
+    storageBucket: `${process.env.GOOGLE_CLOUD_PROJECT || "plaud-own"}.firebasestorage.app`,
+    messagingSenderId: process.env.FIREBASE_MESSAGING_SENDER_ID || "",
+    appId: process.env.FIREBASE_APP_ID || "",
   });
 });
 
@@ -835,7 +838,7 @@ app.post("/api/process", async (req, res) => {
   } catch (error: any) {
     console.warn("[PROCESS ERROR] Initiating high-fidelity fallback or returning error:", error);
     // If it's a real file upload or written text from the user, do NOT silently fall back to mock data!
-    if (req.body.base64Data) {
+    if (!req.body.isSample && req.body.sampleType !== "custom") {
       res.status(500).json({ error: cleanErrorMessage(error) });
       return;
     }
@@ -1327,7 +1330,7 @@ app.get("/api/sessions/:id/media", async (req, res, next) => {
 
     const [metadata] = await file.getMetadata();
     res.setHeader("Content-Type", metadata.contentType || "audio/mpeg");
-    if (metadata.size) {
+    if (metadata.size !== undefined) {
       res.setHeader("Content-Length", String(metadata.size));
     }
 
