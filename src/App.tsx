@@ -28,7 +28,7 @@ import {
 
 import { StudySession, ProcessingStatus, ActionItem, Flashcard, ChatMessage, TopicFolder } from "./types";
 import AudioRecorder from "./components/AudioRecorder";
-import { auth, googleProvider, signInWithRedirect, getRedirectResult, signOut, User, initFirebase } from "./firebase";
+import { auth, googleProvider, signInWithPopup, signOut, User, initFirebase } from "./firebase";
 import { onAuthStateChanged } from "firebase/auth";
 import ActionItemsList from "./components/ActionItemsList";
 import FlashcardsDeck from "./components/FlashcardsDeck";
@@ -183,8 +183,6 @@ export default function App() {
     const setupAuth = async () => {
       const activeAuth = await initFirebase();
       if (activeAuth) {
-        // Handle redirect result from signInWithRedirect (fires after Google OAuth redirect)
-        getRedirectResult(activeAuth).catch(() => {});
         unsubscribe = onAuthStateChanged(activeAuth, (currentUser) => {
           setUser(currentUser);
           setAuthLoading(false);
@@ -888,15 +886,13 @@ This workspace was custom-curated in **⚡ Turbo Fast-Track Mode** to bypass bro
 
             <div className="pt-2">
               <button
-                onClick={async () => {
-                  try {
-                    setUploadError(null);
-                    if (auth) {
-                      await signInWithRedirect(auth, googleProvider);
-                    }
-                  } catch (e: any) {
-                    console.error("Login failed:", e);
-                    setUploadError(`Error de inicio de sesión: ${e.message}`);
+                onClick={() => {
+                  if (auth) {
+                    signInWithPopup(auth, googleProvider).catch((e: any) => {
+                      if (e.code !== 'auth/popup-closed-by-user') {
+                        setUploadError(`Error de inicio de sesión: ${e.message}`);
+                      }
+                    });
                   }
                 }}
                 className="w-full py-3.5 px-4 bg-white hover:bg-slate-50 text-slate-800 font-extrabold text-xs rounded-xl shadow-lg transition duration-150 flex items-center justify-center gap-2.5 cursor-pointer active:scale-[0.98]"
@@ -1041,15 +1037,13 @@ This workspace was custom-curated in **⚡ Turbo Fast-Track Mode** to bypass bro
               </div>
             ) : (
               <button
-                onClick={async () => {
-                  try {
-                    setUploadError(null);
-                    if (auth) {
-                      await signInWithRedirect(auth, googleProvider);
-                    }
-                  } catch (e: any) {
-                    console.error("Login failed:", e);
-                    setUploadError(`Error de inicio de sesión: ${e.message}`);
+                onClick={() => {
+                  if (auth) {
+                    signInWithPopup(auth, googleProvider).catch((e: any) => {
+                      if (e.code !== 'auth/popup-closed-by-user') {
+                        setUploadError(`Error de inicio de sesión: ${e.message}`);
+                      }
+                    });
                   }
                 }}
                 className="px-3.5 py-2 text-xs font-bold text-slate-700 bg-white border border-slate-200 hover:bg-slate-50 rounded-lg shadow-2xs transition flex items-center gap-1.5 cursor-pointer active:scale-95"
