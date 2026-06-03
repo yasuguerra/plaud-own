@@ -583,15 +583,15 @@ const studyResponseSchema = {
                     label: { type: Type.STRING, description: "Specific definition/concept" },
                     details: { type: Type.STRING, description: "Core concise definition takeaway" }
                   },
-                  required: ["id", "label"]
+                  required: ["id", "label", "details"]
                 }
               }
             },
-            required: ["id", "label"]
+            required: ["id", "label", "details", "children"]
           }
         }
       },
-      required: ["id", "label"]
+      required: ["id", "label", "details", "color", "children"]
     },
     flashcards: {
       type: Type.ARRAY,
