@@ -93,9 +93,15 @@ function getGeminiClient(): GoogleGenAI {
   const isPlaceholder = !apiKey || apiKey === "MY_GEMINI_API_KEY" || apiKey === "YOUR_GEMINI_API_KEY" || apiKey.trim() === "";
 
   if (!isPlaceholder) {
-    console.log("[GEMINI CLIENT INIT] Authenticating using provided GEMINI_API_KEY.");
-    // apiKey and project/location are mutually exclusive in the GoogleGenAI initializer
-    aiClient = new GoogleGenAI({ apiKey: apiKey });
+    // AQ... keys are Vertex AI Express keys — require vertexai: true (no project/location needed)
+    // AIzaSy... keys are Google AI Studio keys — use apiKey only
+    if (apiKey.startsWith("AQ")) {
+      console.log("[GEMINI CLIENT INIT] Vertex AI Express key detected. Using vertexai: true.");
+      aiClient = new GoogleGenAI({ vertexai: true, apiKey: apiKey });
+    } else {
+      console.log("[GEMINI CLIENT INIT] Google AI Studio key detected.");
+      aiClient = new GoogleGenAI({ apiKey: apiKey });
+    }
   } else {
     console.log("[GEMINI CLIENT INIT] No API Key configured. Authenticating using Application Default Credentials (ADC) and Vertex AI settings...");
     // Fallback to Google Gen AI with no api key, which resolves to local credentials or active GCP service account
