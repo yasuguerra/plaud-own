@@ -28,7 +28,7 @@ import {
 
 import { StudySession, ProcessingStatus, ActionItem, Flashcard, ChatMessage, TopicFolder } from "./types";
 import AudioRecorder from "./components/AudioRecorder";
-import { auth, googleProvider, signInWithPopup, signOut, User, initFirebase } from "./firebase";
+import { auth, googleProvider, signInWithRedirect, getRedirectResult, signOut, User, initFirebase } from "./firebase";
 import { onAuthStateChanged } from "firebase/auth";
 import ActionItemsList from "./components/ActionItemsList";
 import FlashcardsDeck from "./components/FlashcardsDeck";
@@ -183,6 +183,8 @@ export default function App() {
     const setupAuth = async () => {
       const activeAuth = await initFirebase();
       if (activeAuth) {
+        // Handle redirect result from signInWithRedirect (fires after Google OAuth redirect)
+        getRedirectResult(activeAuth).catch(() => {});
         unsubscribe = onAuthStateChanged(activeAuth, (currentUser) => {
           setUser(currentUser);
           setAuthLoading(false);
@@ -890,7 +892,7 @@ This workspace was custom-curated in **⚡ Turbo Fast-Track Mode** to bypass bro
                   try {
                     setUploadError(null);
                     if (auth) {
-                      await signInWithPopup(auth, googleProvider);
+                      await signInWithRedirect(auth, googleProvider);
                     }
                   } catch (e: any) {
                     console.error("Login failed:", e);
@@ -1043,7 +1045,7 @@ This workspace was custom-curated in **⚡ Turbo Fast-Track Mode** to bypass bro
                   try {
                     setUploadError(null);
                     if (auth) {
-                      await signInWithPopup(auth, googleProvider);
+                      await signInWithRedirect(auth, googleProvider);
                     }
                   } catch (e: any) {
                     console.error("Login failed:", e);
