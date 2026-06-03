@@ -28,7 +28,7 @@ import {
 
 import { StudySession, ProcessingStatus, ActionItem, Flashcard, ChatMessage, TopicFolder } from "./types";
 import AudioRecorder from "./components/AudioRecorder";
-import { auth, googleProvider, signInWithPopup, signOut, User, initFirebase } from "./firebase";
+import { auth, googleProvider, signInWithPopup, signInWithRedirect, getRedirectResult, signOut, User, initFirebase } from "./firebase";
 import { onAuthStateChanged } from "firebase/auth";
 import ActionItemsList from "./components/ActionItemsList";
 import FlashcardsDeck from "./components/FlashcardsDeck";
@@ -183,6 +183,8 @@ export default function App() {
     const setupAuth = async () => {
       const activeAuth = await initFirebase();
       if (activeAuth) {
+        // Handle redirect result if user was sent back from Google OAuth redirect
+        getRedirectResult(activeAuth).catch(() => {});
         unsubscribe = onAuthStateChanged(activeAuth, (currentUser) => {
           setUser(currentUser);
           setAuthLoading(false);
@@ -889,7 +891,10 @@ This workspace was custom-curated in **⚡ Turbo Fast-Track Mode** to bypass bro
                 onClick={() => {
                   if (auth) {
                     signInWithPopup(auth, googleProvider).catch((e: any) => {
-                      if (e.code !== 'auth/popup-closed-by-user') {
+                      if (e.code === 'auth/popup-blocked' || e.code === 'auth/operation-not-supported-in-this-environment') {
+                        // Popup blocked — fall back to redirect
+                        signInWithRedirect(auth, googleProvider);
+                      } else if (e.code !== 'auth/popup-closed-by-user') {
                         setUploadError(`Error de inicio de sesión: ${e.message}`);
                       }
                     });
@@ -1040,7 +1045,9 @@ This workspace was custom-curated in **⚡ Turbo Fast-Track Mode** to bypass bro
                 onClick={() => {
                   if (auth) {
                     signInWithPopup(auth, googleProvider).catch((e: any) => {
-                      if (e.code !== 'auth/popup-closed-by-user') {
+                      if (e.code === 'auth/popup-blocked' || e.code === 'auth/operation-not-supported-in-this-environment') {
+                        signInWithRedirect(auth, googleProvider);
+                      } else if (e.code !== 'auth/popup-closed-by-user') {
                         setUploadError(`Error de inicio de sesión: ${e.message}`);
                       }
                     });

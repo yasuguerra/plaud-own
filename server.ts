@@ -1595,6 +1595,23 @@ async function startServer() {
   } else {
     console.log("Starting server in PRODUCTION mode with compiled assets...");
     const distPath = path.join(process.cwd(), "dist");
+
+    // Proxy Firebase Auth handler endpoints to Firebase Hosting
+    // Required for signInWithRedirect fallback on Cloud Run
+    app.use("/__/auth", async (req, res) => {
+      const target = `https://plaud-own.firebaseapp.com/__/auth${req.path}${req.url.includes("?") ? req.url.substring(req.url.indexOf("?")) : ""}`;
+      try {
+        const { default: https } = await import("https");
+        const proxyReq = https.get(target, { headers: { host: "plaud-own.firebaseapp.com" } }, (proxyRes) => {
+          res.writeHead(proxyRes.statusCode || 200, proxyRes.headers);
+          proxyRes.pipe(res);
+        });
+        proxyReq.on("error", () => res.status(502).send("Firebase auth proxy error"));
+      } catch (e) {
+        res.status(502).send("Firebase auth proxy unavailable");
+      }
+    });
+
     app.use(express.static(distPath));
     app.get("*", (req, res) => {
       // If the request is for an asset or static file that doesn't exist, return 404 instead of falling back to index.html

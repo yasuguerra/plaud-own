@@ -1,5 +1,5 @@
 import { initializeApp, getApps, getApp } from "firebase/app";
-import { getAuth, GoogleAuthProvider, signInWithPopup, signOut, User } from "firebase/auth";
+import { getAuth, GoogleAuthProvider, signInWithPopup, signInWithRedirect, getRedirectResult, signOut, User } from "firebase/auth";
 
 export let auth: any = null;
 export const googleProvider = new GoogleAuthProvider();
@@ -22,5 +22,5 @@ export async function initFirebase() {
   }
 }
 
-export { signInWithPopup, signOut };
+export { signInWithPopup, signInWithRedirect, getRedirectResult, signOut };
 export type { User };
