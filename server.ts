@@ -1588,6 +1588,11 @@ async function startServer() {
     const distPath = path.join(process.cwd(), "dist");
     app.use(express.static(distPath));
     app.get("*", (req, res) => {
+      // If the request is for an asset or static file that doesn't exist, return 404 instead of falling back to index.html
+      if (req.path.startsWith("/assets/") || req.path.includes(".")) {
+        res.status(404).send("Not Found");
+        return;
+      }
       res.setHeader("Cache-Control", "no-store, no-cache, must-revalidate, proxy-revalidate");
       res.setHeader("Pragma", "no-cache");
       res.setHeader("Expires", "0");
