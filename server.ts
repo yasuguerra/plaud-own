@@ -59,6 +59,12 @@ const upload = multer({
   },
 });
 
+// COOP header: allow Firebase Auth popup to communicate with opener
+app.use((_req, res, next) => {
+  res.setHeader("Cross-Origin-Opener-Policy", "unsafe-none");
+  next();
+});
+
 // Request logging middleware
 app.use((req, res, next) => {
   console.log(`[EXPRESS HOST] Incoming request: ${req.method} ${req.url}`);
