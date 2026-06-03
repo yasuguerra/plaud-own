@@ -50,7 +50,7 @@ function FormatMarkdown({ text }: { text: string }) {
           return <h4 key={idx} className="text-sm font-bold text-slate-800 mt-4 border-b border-slate-50 pb-1">{trimmed.replace("###", "").trim()}</h4>;
         }
         if (trimmed.startsWith("##")) {
-          return <h3 key={idx} className="text-base font-bold text-slate-900 mt-5 border-b border-pink-50/40 pb-1 flex items-center gap-1.5"><Activity className="h-4 w-4 text-indigo-500" /> {trimmed.replace("##", "").trim()}</h3>;
+          return <h3 key={idx} className="text-base font-bold text-slate-900 mt-5 border-b border-pink-50/40 pb-1 flex items-center gap-1.5"><Activity className="h-4 w-4 text-indigo-505 text-indigo-500" /> {trimmed.replace("##", "").trim()}</h3>;
         }
         if (trimmed.startsWith("#")) {
           return <h2 key={idx} className="text-lg font-bold text-indigo-950 mt-6 tracking-tight">{trimmed.replace("#", "").trim()}</h2>;
@@ -125,11 +125,11 @@ function RenderTranscriptTimeline({ text }: { text: string }) {
             )}
             <div className="flex-1 min-w-0">
               {seg.speaker && (
-                <span className="block font-bold text-[11px] mb-0.5 text-indigo-950">
+                <span className="block font-bold text-slate-850 text-[11px] mb-0.5 text-indigo-950">
                   {seg.speaker}
                 </span>
               )}
-              <p className="text-slate-600 font-sans text-xs leading-relaxed">
+              <p className="text-slate-650 text-slate-600 font-sans text-xs leading-relaxed">
                 {seg.content}
               </p>
             </div>
@@ -193,7 +193,7 @@ export default function App() {
       }
     };
 
-    setupAuth();
+    setupAuth().catch(() => setAuthLoading(false));
     return () => {
       if (unsubscribe) unsubscribe();
     };
@@ -645,85 +645,23 @@ This workspace was custom-curated in **⚡ Turbo Fast-Track Mode** to bypass bro
     else if (isText) mediaType = "document";
 
     try {
-      const CHUNK_SIZE = 4 * 1024 * 1024; // 4MB chunks
+      const formData = new FormData();
+      formData.append("file", file);
+      formData.append("mediaType", mediaType);
+
+      // Start the merge/OCR simulation stages to run concurrently during server-side processing
+      const delayPromise = simulateMergeStages(isPdf);
+
       const userId = user ? user.uid : "guest";
-      let responsePromise: Promise<Response>;
+      const fetchPromise = fetch("/api/upload-file", {
+        method: "POST",
+        headers: { "x-user-id": userId },
+        body: formData
+      });
 
-      if (file.size <= CHUNK_SIZE) {
-        // Fast path for small files
-        const formData = new FormData();
-        formData.append("file", file);
-        formData.append("mediaType", mediaType);
+      // Await both the upload completion/Gemini generation + the user-experience simulation stages
+      const [_, response] = await Promise.all([delayPromise, fetchPromise]);
 
-        const delayPromise = simulateMergeStages(isPdf);
-        const fetchPromise = fetch("/api/upload-file", {
-          method: "POST",
-          headers: { "x-user-id": userId },
-          body: formData
-        });
-
-        // Await both the upload completion/Gemini generation + the user-experience simulation stages
-        const [_, response] = await Promise.all([delayPromise, fetchPromise]);
-        responsePromise = Promise.resolve(response);
-      } else {
-        // Chunked upload for files larger than 4MB
-        const uploadId = "up_" + Math.random().toString(36).substring(2, 15);
-        const totalChunks = Math.ceil(file.size / CHUNK_SIZE);
-
-        for (let chunkIndex = 0; chunkIndex < totalChunks; chunkIndex++) {
-          const start = chunkIndex * CHUNK_SIZE;
-          const end = Math.min(start + CHUNK_SIZE, file.size);
-          const chunkSlice = file.slice(start, end);
-
-          const chunkFormData = new FormData();
-          chunkFormData.append("chunk", chunkSlice, file.name);
-          chunkFormData.append("uploadId", uploadId);
-          chunkFormData.append("chunkIndex", chunkIndex.toString());
-
-          setProcessingStatus({
-            stage: "uploading",
-            progress: Math.round(10 + (chunkIndex / totalChunks) * 20),
-            message: `Uploading slice ${chunkIndex + 1} of ${totalChunks} (${Math.round((end / file.size) * 100)}%)...`
-          });
-
-          const chunkRes = await fetch("/api/upload-chunk", {
-            method: "POST",
-            body: chunkFormData
-          });
-
-          if (!chunkRes.ok) {
-            const errText = await chunkRes.text();
-            let errMsg = "Chunk upload failed.";
-            try {
-              errMsg = JSON.parse(errText).error || errMsg;
-            } catch {}
-            throw new Error(errMsg);
-          }
-        }
-
-        // Set state to transcribing/processing and simulate merge/generate stages in parallel
-        setProcessingStatus({ stage: "transcribing", progress: 30, message: "Assembling slices and initiating Gemini..." });
-        const delayPromise = simulateMergeStages(isPdf);
-        const fetchPromise = fetch("/api/merge-chunks", {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            "x-user-id": userId
-          },
-          body: JSON.stringify({
-            uploadId,
-            fileName: file.name,
-            mediaType,
-            mimeType: file.type || "application/octet-stream",
-            totalChunks
-          })
-        });
-
-        const [_, response] = await Promise.all([delayPromise, fetchPromise]);
-        responsePromise = Promise.resolve(response);
-      }
-
-      const response = await responsePromise;
       const responseText = await response.text();
       const isHtml = responseText.includes("Cookie check") || responseText.includes("Action required to load") || responseText.trim().toLowerCase().startsWith("<!doctype html>");
       if (isHtml) {
@@ -793,7 +731,8 @@ This workspace was custom-curated in **⚡ Turbo Fast-Track Mode** to bypass bro
 
     if (file.size > 150 * 1024 * 1024) {
       const sizeMb = Math.round(file.size / 1024 / 1024);
-      console.warn(`⚠️ Large file detected (${sizeMb}MB). Processing with sequential slice chunking.`);
+      setUploadError(`⚠️ This file is excessively large (${sizeMb}MB). Cloud sandboxes limit single multipart uploads to 150MB to maintain network performance. Please try uploading a file under 150MB.`);
+      return;
     }
 
     processStudyFile(file);
@@ -1141,8 +1080,8 @@ This workspace was custom-curated in **⚡ Turbo Fast-Track Mode** to bypass bro
             
             return (
               <div className="flex-1 flex items-center justify-center p-8 bg-slate-50 overflow-y-auto">
-                <div className="bg-white rounded-2xl border border-rose-200 border-rose-200/70 p-8 shadow-md flex flex-col items-center justify-center text-center max-w-md w-full space-y-5">
-                  <div className="h-12 w-12 rounded-full bg-rose-50 flex items-center justify-center text-rose-600">
+                <div className="bg-white rounded-2xl border border-rose-250 border-rose-250/70 p-8 shadow-md flex flex-col items-center justify-center text-center max-w-md w-full space-y-5">
+                  <div className="h-12 w-12 rounded-full bg-rose-50 flex items-center justify-center text-rose-650">
                     <AlertCircle className="h-6 w-6" />
                   </div>
                   
@@ -1165,7 +1104,7 @@ This workspace was custom-curated in **⚡ Turbo Fast-Track Mode** to bypass bro
                         <p className="font-medium">1. Ve al menú superior derecho y haz clic en el engranaje de <strong className="text-amber-800">Settings &gt; Secrets</strong>.</p>
                         <p className="font-medium">2. Añade un nuevo secreto con el nombre exacto de <strong className="text-amber-800">GEMINI_API_KEY</strong> y pega tu token de Google AI Studio.</p>
                         <p className="font-medium">3. Guarda los cambios e inténtalo de nuevo.</p>
-                        <div className="pt-1 border-t border-amber-200/30 mt-1">
+                        <div className="pt-1 border-t border-amber-250/30 mt-1">
                           <p className="font-bold text-amber-900">💡 ¿Quieres probar la app de inmediato sin clave?</p>
                           <p>Haz clic en <strong className="text-indigo-600">"Ir al Simulador Local"</strong> abajo para rellenar temas académicos y generar mapas y flashcards instantáneos al instante sin llamadas al servidor.</p>
                         </div>
@@ -1184,7 +1123,7 @@ This workspace was custom-curated in **⚡ Turbo Fast-Track Mode** to bypass bro
                         onClick={() => {
                           window.open(window.location.href, '_blank');
                         }}
-                        className="w-full bg-indigo-600 border border-indigo-600 text-white font-bold py-2.5 px-4 rounded-lg hover:bg-indigo-700 text-xs transition duration-150 shadow-xs flex items-center justify-center gap-2 active:scale-95 cursor-pointer font-sans"
+                        className="w-full bg-indigo-600 border border-indigo-650 text-white font-bold py-2.5 px-4 rounded-lg hover:bg-indigo-700 text-xs transition duration-150 shadow-xs flex items-center justify-center gap-2 active:scale-95 cursor-pointer font-sans"
                       >
                         🌐 Abrir en una Nueva Pestaña
                       </button>
@@ -1198,7 +1137,7 @@ This workspace was custom-curated in **⚡ Turbo Fast-Track Mode** to bypass bro
                           setProcessingStatus({ stage: "idle", progress: 0, message: "" });
                           setUploadError(null);
                         }}
-                        className="w-full bg-indigo-600 border border-indigo-600 text-white font-bold py-2.5 px-4 rounded-lg hover:bg-indigo-700 text-xs transition duration-150 shadow-xs flex items-center justify-center gap-2 active:scale-95 cursor-pointer font-sans text-center"
+                        className="w-full bg-indigo-600 border border-indigo-650 text-white font-bold py-2.5 px-4 rounded-lg hover:bg-indigo-750 text-xs transition duration-150 shadow-xs flex items-center justify-center gap-2 active:scale-95 cursor-pointer font-sans text-center"
                       >
                         ⚡ Ir al Simulador Local
                       </button>
@@ -1206,7 +1145,7 @@ This workspace was custom-curated in **⚡ Turbo Fast-Track Mode** to bypass bro
 
                     <button 
                       onClick={() => { setProcessingStatus({ stage: "idle", progress: 0, message: "" }); setUploadError(null); }}
-                      className="w-full bg-slate-950 border border-slate-900 text-white font-bold py-2.5 px-4 rounded-lg hover:bg-slate-800 text-xs transition active:scale-95 cursor-pointer font-sans"
+                      className="w-full bg-slate-950 border border-slate-900 text-white font-bold py-2.5 px-4 rounded-lg hover:bg-slate-850 text-xs transition active:scale-95 cursor-pointer font-sans"
                     >
                       Return to Station
                     </button>
@@ -1227,7 +1166,7 @@ This workspace was custom-curated in **⚡ Turbo Fast-Track Mode** to bypass bro
               <div className="w-full bg-slate-100 rounded-full h-1 overflow-hidden">
                 <div className="bg-indigo-600 h-full transition-all duration-350" style={{ width: `${processingStatus.progress}%` }} />
               </div>
-              <p className="text-xs text-slate-600 italic font-medium animate-pulse">
+              <p className="text-xs text-slate-650 text-slate-600 italic font-medium animate-pulse">
                 "{processingStatus.message}"
               </p>
             </div>
@@ -1338,7 +1277,7 @@ This workspace was custom-curated in **⚡ Turbo Fast-Track Mode** to bypass bro
                           onClick={() => {
                             setSelectedSynthesisFolderId(currentFolder.id);
                           }}
-                          className="w-full bg-white border border-indigo-100 text-indigo-700 text-[10px] font-bold py-1.5 rounded-lg hover:bg-indigo-100/30 transition flex items-center justify-center gap-1 shadow-2xs cursor-pointer"
+                          className="w-full bg-white border border-indigo-150 text-indigo-700 text-[10px] font-bold py-1.5 rounded-lg hover:bg-indigo-100/30 transition flex items-center justify-center gap-1 shadow-2xs cursor-pointer"
                         >
                           📖 Leer Síntesis de Tema con IA
                         </button>
@@ -1421,7 +1360,7 @@ This workspace was custom-curated in **⚡ Turbo Fast-Track Mode** to bypass bro
                   }`}
                 >
                   <div className="flex items-center gap-1.5">
-                    <span className={`p-1 rounded-md ${activeTab === "summary" ? "bg-indigo-100 text-indigo-700" : "bg-slate-100 text-slate-500"}`}>
+                    <span className={`p-1 rounded-md ${activeTab === "summary" ? "bg-indigo-100 text-indigo-700" : "bg-slate-100 text-slate-550"}`}>
                       <FileText className="h-3.5 w-3.5" />
                     </span>
                     <span className="font-sans font-extrabold text-[11px] text-slate-800">Ver Resumen Ejecutivo</span>
@@ -1441,7 +1380,7 @@ This workspace was custom-curated in **⚡ Turbo Fast-Track Mode** to bypass bro
                   }`}
                 >
                   <div className="flex items-center gap-1.5">
-                    <span className={`p-1 rounded-md ${activeTab === "transcript" ? "bg-indigo-100 text-indigo-700" : "bg-slate-100 text-slate-500"}`}>
+                    <span className={`p-1 rounded-md ${activeTab === "transcript" ? "bg-indigo-100 text-indigo-700" : "bg-slate-100 text-slate-550"}`}>
                       <FileAudio className="h-3.5 w-3.5" />
                     </span>
                     <span className="font-sans font-extrabold text-[11px] text-slate-800">Ver Transcripción por Temas</span>
@@ -1526,7 +1465,7 @@ This workspace was custom-curated in **⚡ Turbo Fast-Track Mode** to bypass bro
             </div>
 
             {/* Column 3: Copilot Tutoring AI Assistant chat (Span 4) */}
-            <div className="col-span-12 lg:col-span-4 border-l border-slate-200 flex flex-col bg-slate-50 h-full overflow-hidden">
+            <div className="col-span-12 lg:col-span-4 border-l border-slate-205 border-slate-200 flex flex-col bg-slate-50 h-full overflow-hidden">
               <ChatBuddy 
                 session={activeSession} 
                 onUpdateChatHistory={handleUpdateChatHistory}
@@ -1579,7 +1518,7 @@ This workspace was custom-curated in **⚡ Turbo Fast-Track Mode** to bypass bro
                     className={`border-2 border-dashed rounded-xl p-6 flex flex-col items-center justify-center text-center transition min-h-[160px] cursor-pointer ${
                       dragOver 
                         ? "border-indigo-600 bg-indigo-50/20 text-indigo-700" 
-                        : "border-slate-200 bg-slate-50/50 text-slate-500 hover:bg-slate-50/80 hover:border-slate-300"
+                        : "border-slate-200 bg-slate-50/50 text-slate-550 text-slate-500 hover:bg-slate-50/80 hover:border-slate-350"
                     }`}
                     onClick={() => document.getElementById("hidden-file-btn")?.click()}
                   >
@@ -1705,13 +1644,13 @@ This workspace was custom-curated in **⚡ Turbo Fast-Track Mode** to bypass bro
                     <div className="grid grid-cols-2 gap-2">
                       <button
                         onClick={() => setSimMediaType("audio")}
-                        className={`py-2 px-3 border rounded-lg font-bold text-center transition duration-150 ${simMediaType === "audio" ? "border-indigo-600 bg-indigo-50 text-indigo-700" : "border-slate-200 bg-slate-50 hover:bg-slate-100 text-slate-600"}`}
+                        className={`py-2 px-3 border rounded-lg font-bold text-center transition duration-150 ${simMediaType === "audio" ? "border-indigo-600 bg-indigo-50 text-indigo-700" : "border-slate-250 border-slate-200 bg-slate-50 hover:bg-slate-100 text-slate-600"}`}
                       >
                         🎙️ Simulated Audio
                       </button>
                       <button
                         onClick={() => setSimMediaType("video")}
-                        className={`py-2 px-3 border rounded-lg font-bold text-center transition duration-150 ${simMediaType === "video" ? "border-indigo-600 bg-indigo-50 text-indigo-700" : "border-slate-200 bg-slate-50 hover:bg-slate-100 text-slate-600"}`}
+                        className={`py-2 px-3 border rounded-lg font-bold text-center transition duration-150 ${simMediaType === "video" ? "border-indigo-600 bg-indigo-50 text-indigo-700" : "border-slate-250 border-slate-200 bg-slate-50 hover:bg-slate-100 text-slate-600"}`}
                       >
                         📺 Simulated Video
                       </button>
@@ -1744,7 +1683,7 @@ This workspace was custom-curated in **⚡ Turbo Fast-Track Mode** to bypass bro
 
               {/* Quick database links catalog if any saved */}
               {sessions.length > 0 && (
-                <div className="border-t border-slate-200/60 pt-4 mt-auto">
+                <div className="border-t border-slate-105 border-slate-200/60 pt-4 mt-auto">
                   <h3 className="text-[10px] font-bold uppercase text-slate-400 tracking-wider mb-2">Archivo de Reuniones</h3>
                   <div className="max-h-[110px] overflow-y-auto space-y-1.5 pr-1">
                     {sessions.map((sess) => (
@@ -1754,7 +1693,7 @@ This workspace was custom-curated in **⚡ Turbo Fast-Track Mode** to bypass bro
                         className="flex items-center justify-between p-2 rounded-lg bg-slate-50 hover:bg-slate-100 border border-slate-100 hover:border-slate-200 transition text-[11px] text-slate-700 cursor-pointer animate-fade-in"
                       >
                         <span className="font-semibold truncate max-w-[80%]">{sess.title || sess.mediaName}</span>
-                        <span className="text-[10px] text-indigo-600 font-bold">Ver &gt;</span>
+                        <span className="text-[10px] text-indigo-650 font-bold">Ver &gt;</span>
                       </div>
                     ))}
                   </div>
@@ -1887,7 +1826,7 @@ This workspace was custom-curated in **⚡ Turbo Fast-Track Mode** to bypass bro
                     </div>
                   )}
                   <div>
-                    <h4 className="font-bold text-slate-800 text-xs leading-none">{user.displayName || "Usuario"}</h4>
+                    <h4 className="font-bold text-slate-850 text-xs leading-none">{user.displayName || "Usuario"}</h4>
                     <p className="text-[10px] text-slate-400 font-semibold mt-1">{user.email}</p>
                     <p className="text-[8px] text-slate-400 font-mono mt-0.5">UID: {user.uid}</p>
                   </div>
@@ -1920,7 +1859,7 @@ This workspace was custom-curated in **⚡ Turbo Fast-Track Mode** to bypass bro
                     </div>
                     <div>
                       <span className="block text-[8px] text-slate-400 uppercase font-bold">GCS Storage Bucket</span>
-                      <span className="font-mono text-slate-700">plaud-own-media</span>
+                      <span className="font-mono text-slate-700">plaud-own-media-assets</span>
                     </div>
                     <div className="col-span-2">
                       <span className="block text-[8px] text-slate-400 uppercase font-bold">Firestore NoSQL Database</span>
@@ -1934,7 +1873,7 @@ This workspace was custom-curated in **⚡ Turbo Fast-Track Mode** to bypass bro
                 <button
                   type="button"
                   onClick={() => setIsSettingsOpen(false)}
-                  className="px-3.5 py-2 text-xs font-bold text-slate-500 hover:text-slate-700 transition cursor-pointer bg-slate-100 rounded-lg"
+                  className="px-3.5 py-2 text-xs font-bold text-slate-500 hover:text-slate-700 transition cursor-pointer bg-slate-105 bg-slate-100 rounded-lg"
                 >
                   Cancelar
                 </button>
