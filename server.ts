@@ -93,12 +93,9 @@ function getGeminiClient(): GoogleGenAI {
   const isPlaceholder = !apiKey || apiKey === "MY_GEMINI_API_KEY" || apiKey === "YOUR_GEMINI_API_KEY" || apiKey.trim() === "";
 
   if (!isPlaceholder) {
-    console.log("[GEMINI CLIENT INIT] Authenticating using provided GEMINI_API_KEY and Vertex AI settings.");
-    aiClient = new GoogleGenAI({
-      apiKey: apiKey,
-      project: process.env.GOOGLE_CLOUD_PROJECT || "plaud-own",
-      location: process.env.GOOGLE_CLOUD_LOCATION || "us-central1"
-    });
+    console.log("[GEMINI CLIENT INIT] Authenticating using provided GEMINI_API_KEY.");
+    // apiKey and project/location are mutually exclusive in the GoogleGenAI initializer
+    aiClient = new GoogleGenAI({ apiKey: apiKey });
   } else {
     console.log("[GEMINI CLIENT INIT] No API Key configured. Authenticating using Application Default Credentials (ADC) and Vertex AI settings...");
     // Fallback to Google Gen AI with no api key, which resolves to local credentials or active GCP service account
