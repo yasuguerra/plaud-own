@@ -244,7 +244,7 @@ export default function MindMapCanvas({ rootNode }: MindMapCanvasProps) {
           </div>
           
           <div className="absolute bottom-3 left-3 flex items-center gap-1.5 bg-white/95 px-2.5 py-1.5 rounded-lg border border-slate-100 shadow-xs text-[10px] text-slate-500 font-medium">
-            <HelpCircle className="h-3.5 w-3.5 text-indigo-505 text-indigo-500" />
+            <HelpCircle className="h-3.5 w-3.5 text-indigo-500" />
             Click nodes to inspect definitions or collapse branches
           </div>
         </div>

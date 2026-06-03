@@ -450,7 +450,7 @@ app.get("/api/health", (req, res) => {
 // Config endpoint for client-side Firebase Auth initialization
 app.get("/api/config", (req, res) => {
   res.json({
-    apiKey: process.env.GEMINI_API_KEY || "",
+    apiKey: process.env.FIREBASE_API_KEY || "",
     authDomain: `${process.env.GOOGLE_CLOUD_PROJECT || "plaud-own"}.firebaseapp.com`,
     projectId: process.env.GOOGLE_CLOUD_PROJECT || "plaud-own",
   });
@@ -835,7 +835,7 @@ app.post("/api/process", async (req, res) => {
   } catch (error: any) {
     console.warn("[PROCESS ERROR] Initiating high-fidelity fallback or returning error:", error);
     // If it's a real file upload or written text from the user, do NOT silently fall back to mock data!
-    if (!req.body.isSample && req.body.sampleType !== "custom") {
+    if (req.body.base64Data) {
       res.status(500).json({ error: cleanErrorMessage(error) });
       return;
     }
@@ -1327,7 +1327,9 @@ app.get("/api/sessions/:id/media", async (req, res, next) => {
 
     const [metadata] = await file.getMetadata();
     res.setHeader("Content-Type", metadata.contentType || "audio/mpeg");
-    res.setHeader("Content-Length", metadata.size);
+    if (metadata.size) {
+      res.setHeader("Content-Length", String(metadata.size));
+    }
 
     file.createReadStream().pipe(res);
   } catch (error: any) {

@@ -15,6 +15,7 @@ export default function AudioRecorder({ onAudioReady, isProcessing }: AudioRecor
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const audioChunksRef = useRef<Blob[]>([]);
   const timerRef = useRef<NodeJS.Timeout | null>(null);
+  const recordingTimeRef = useRef(0);
 
   useEffect(() => {
     return () => {
@@ -24,8 +25,13 @@ export default function AudioRecorder({ onAudioReady, isProcessing }: AudioRecor
 
   const startTimer = () => {
     setRecordingTime(0);
+    recordingTimeRef.current = 0;
     timerRef.current = setInterval(() => {
-      setRecordingTime((prev) => prev + 1);
+      setRecordingTime((prev) => {
+        const next = prev + 1;
+        recordingTimeRef.current = next;
+        return next;
+      });
     }, 1000);
   };
 
@@ -78,7 +84,7 @@ export default function AudioRecorder({ onAudioReady, isProcessing }: AudioRecor
           const resultBase64 = reader.result as string;
           // Extract base64 payload out of DataURL (strips headers like "data:audio/webm;base64,")
           const base64Data = resultBase64.split(",")[1];
-          onAudioReady(base64Data, mimeType, recordingTime);
+          onAudioReady(base64Data, mimeType, recordingTimeRef.current);
         };
       };
 

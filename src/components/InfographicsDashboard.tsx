@@ -51,6 +51,7 @@ export default function InfographicsDashboard({ session }: InfographicsDashboard
 
   const speakerMetrics = getSpeakerMetrics();
 
+  // TODO: wire to real session sentiment data. Currently cosmetic/static curve points.
   // Sentiment analysis curve points
   const sentimentPoints = [
     { label: "Inicio", value: 50, desc: "Alineación inicial" },
@@ -105,7 +106,7 @@ export default function InfographicsDashboard({ session }: InfographicsDashboard
                   let accumulatedPercent = 0;
                   return speakerMetrics.map((sm, idx) => {
                     const strokeDasharray = `${sm.percent} ${100 - sm.percent}`;
-                    const strokeDashoffset = 100 - accumulatedPercent + 25; // +25 to start at top center
+                    const strokeDashoffset = 100 - accumulatedPercent;
                     accumulatedPercent += sm.percent;
                     return (
                       <circle
@@ -119,8 +120,9 @@ export default function InfographicsDashboard({ session }: InfographicsDashboard
                         strokeDasharray={strokeDasharray}
                         strokeDashoffset={strokeDashoffset}
                         className="transition-all duration-500 hover:stroke-[4]"
-                        title={`${sm.name}: ${sm.percent}%`}
-                      />
+                      >
+                        <title>{`${sm.name}: ${sm.percent}%`}</title>
+                      </circle>
                     );
                   });
                 })()}
@@ -223,7 +225,7 @@ export default function InfographicsDashboard({ session }: InfographicsDashboard
             const isHigh = 'importance' in step && step.importance === "high";
             const isMed = 'importance' in step && step.importance === "medium";
             return (
-              <div key={idx} className="bg-white border border-slate-150 rounded-xl p-3.5 relative flex flex-col justify-between hover:border-indigo-200 transition">
+              <div key={idx} className="bg-white border border-slate-200 rounded-xl p-3.5 relative flex flex-col justify-between hover:border-indigo-200 transition">
                 <div className="flex items-center justify-between mb-2">
                   <span className="text-[8px] font-black uppercase px-2 py-0.5 rounded-full bg-slate-100 text-slate-500 font-mono">
                     Fase {idx + 1}

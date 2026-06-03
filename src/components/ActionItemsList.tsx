@@ -152,7 +152,7 @@ export default function ActionItemsList({ items, onToggleItem, onAddItem, onDele
             <button
               type="submit"
               disabled={!newTaskText.trim()}
-              className="bg-slate-900 border border-slate-900 text-white hover:bg-slate-800 disabled:bg-slate-100 disabled:border-slate-150 disabled:text-slate-400 font-medium rounded-xl px-4 py-2.5 transition duration-150 flex items-center justify-center shrink-0 shadow-sm active:scale-95"
+              className="bg-slate-900 border border-slate-900 text-white hover:bg-slate-800 disabled:bg-slate-100 disabled:border-slate-200 disabled:text-slate-400 font-medium rounded-xl px-4 py-2.5 transition duration-150 flex items-center justify-center shrink-0 shadow-sm active:scale-95"
               title="Add Item"
             >
               <Plus className="h-4.5 w-4.5" />

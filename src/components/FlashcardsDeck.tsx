@@ -66,7 +66,7 @@ export default function FlashcardsDeck({ cards, onToggleLearned }: FlashcardsDec
           id={`flashcard-wrapper-${currentCard.id}`}
         >
           <div
-            className={`absolute inset-0 w-full h-full rounded-2xl border border-slate-150 shadow-md transition-all duration-700 [transform-style:preserve-3d] ${
+            className={`absolute inset-0 w-full h-full rounded-2xl border border-slate-200 shadow-md transition-all duration-700 [transform-style:preserve-3d] ${
               flipped ? "[transform:rotateY(180deg)]" : ""
             }`}
           >
@@ -129,8 +129,8 @@ export default function FlashcardsDeck({ cards, onToggleLearned }: FlashcardsDec
             onClick={() => onToggleLearned(currentCard.id)}
             className={`flex-1 flex items-center justify-center gap-2 font-sans text-xs font-semibold px-4 py-3 rounded-xl border transition-all duration-150 ${
               currentCard.learned
-                ? "bg-slate-105 border-slate-200 text-slate-500 hover:bg-slate-50"
-                : "bg-emerald-6500 bg-emerald-600 border-emerald-600 font-bold text-white hover:bg-emerald-700 shadow-sm shadow-emerald-100 text-sm active:scale-95"
+                ? "bg-slate-100 border-slate-200 text-slate-500 hover:bg-slate-50"
+                : "bg-emerald-600 border-emerald-600 font-bold text-white hover:bg-emerald-700 shadow-sm shadow-emerald-100 text-sm active:scale-95"
             }`}
           >
             <CheckCircle className="h-4.5 w-4.5" />

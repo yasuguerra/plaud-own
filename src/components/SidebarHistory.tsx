@@ -88,7 +88,7 @@ export default function SidebarHistory({
                   >
                     <Trash2 className="h-3.5 w-3.5" />
                   </button>
-                  <ChevronRight className={`h-3.5 w-3.5 shrink-0 ${isActive ? "text-white/40" : "text-slate-305 text-slate-300"}`} />
+                  <ChevronRight className={`h-3.5 w-3.5 shrink-0 ${isActive ? "text-white/40" : "text-slate-300"}`} />
                 </div>
               </div>
             );

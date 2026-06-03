@@ -109,7 +109,7 @@ export default function ChatBuddy({ session, onUpdateChatHistory }: ChatBuddyPro
         </div>
         <button
           onClick={clearChat}
-          className="p-1.5 rounded-lg border border-slate-150 text-slate-400 hover:text-slate-600 hover:bg-slate-50 transition"
+          className="p-1.5 rounded-lg border border-slate-200 text-slate-400 hover:text-slate-600 hover:bg-slate-50 transition"
           title="Reset Study Chat"
         >
           <RefreshCw className="h-3.5 w-3.5" />
@@ -130,7 +130,7 @@ export default function ChatBuddy({ session, onUpdateChatHistory }: ChatBuddyPro
               <span className="font-sans text-[10px] font-bold text-slate-400">
                 {msg.role === "user" ? "Tú" : "Asistente de IA"}
               </span>
-              <span className="font-mono text-[8px] text-slate-350 text-slate-400">
+              <span className="font-mono text-[8px] text-slate-400">
                 {new Date(msg.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
               </span>
             </div>
@@ -151,7 +151,7 @@ export default function ChatBuddy({ session, onUpdateChatHistory }: ChatBuddyPro
           <div className="flex flex-col items-start animate-pulse">
             <span className="font-sans text-[10px] font-bold text-slate-400 mb-1">El asistente está procesando...</span>
             <div className="rounded-2xl rounded-tl-xs bg-slate-50 p-4 border border-slate-100 flex items-center gap-2 text-xs text-slate-500">
-              <Loader2 className="h-3.5 w-3.5 animate-spin text-indigo-550 text-indigo-500" />
+              <Loader2 className="h-3.5 w-3.5 animate-spin text-indigo-500" />
               Escribiendo respuesta...
             </div>
           </div>
@@ -199,7 +199,7 @@ export default function ChatBuddy({ session, onUpdateChatHistory }: ChatBuddyPro
           <button
             onClick={() => handleSend(inputMsg)}
             disabled={!inputMsg.trim() || isSending}
-            className="h-8.5 w-8.5 rounded-xl bg-slate-900 border border-slate-900 text-white flex items-center justify-center hover:bg-indigo-6500 hover:bg-indigo-600 disabled:bg-slate-100 disabled:border-slate-150 disabled:text-slate-400 transition active:scale-95 shrink-0"
+            className="h-8.5 w-8.5 rounded-xl bg-slate-900 border border-slate-900 text-white flex items-center justify-center hover:bg-indigo-600 disabled:bg-slate-100 disabled:border-slate-200 disabled:text-slate-400 transition active:scale-95 shrink-0"
             title="Send message"
             id="chat-send-bin"
           >
