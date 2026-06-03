@@ -29,7 +29,34 @@ const firestore = new Firestore({
 const storage = new Storage({
   projectId: process.env.GOOGLE_CLOUD_PROJECT || "plaud-own",
 });
-const BUCKET_NAME = "plaud-own-media";
+let BUCKET_NAME = "plaud-own-media";
+
+async function discoverStorageBucket() {
+  const projectId = process.env.GOOGLE_CLOUD_PROJECT || "plaud-own";
+  const defaultBucket = `${projectId}.firebasestorage.app`;
+  const legacyBucket = `${projectId}.appspot.com`;
+  const candidates = ["plaud-own-media", defaultBucket, legacyBucket];
+  
+  for (const candidate of candidates) {
+    try {
+      const bucket = storage.bucket(candidate);
+      const [exists] = await bucket.exists();
+      if (exists) {
+        console.log(`[STORAGE INIT] Successfully verified GCS bucket: ${candidate}`);
+        BUCKET_NAME = candidate;
+        return;
+      }
+    } catch (err: any) {
+      console.warn(`[STORAGE INIT] Checking bucket ${candidate} failed:`, err.message || err);
+    }
+  }
+  console.warn(`[STORAGE INIT] Could not find any of the candidate buckets. Defaulting to: ${BUCKET_NAME}`);
+}
+
+// Invoke on startup
+discoverStorageBucket().catch(err => {
+  console.error("[STORAGE INIT ERROR] Unhandled bucket discovery error:", err);
+});
 
 async function uploadToGCS(filePath: string, destination: string, mimeType: string): Promise<string> {
   try {
@@ -616,6 +643,8 @@ app.post("/api/process", async (req, res) => {
     const ai = getGeminiClient();
 
     let contentsPayload: any[] = [];
+    let gcsUri = "";
+    let geminiFileUri = "";
 
     if (isSample) {
       // The user wants to process one of our high-quality lecture samples
@@ -758,7 +787,6 @@ app.post("/api/process", async (req, res) => {
         }
         const tempFilePath = path.join("/tmp", `${Date.now()}_${safeName}`);
         
-        let gcsUri = "";
         try {
           const buffer = Buffer.from(base64Data, "base64");
           fs.writeFileSync(tempFilePath, buffer);
@@ -767,10 +795,36 @@ app.post("/api/process", async (req, res) => {
           const sessionId = "sess_" + Date.now().toString(36);
           const gcsDestination = `audios/${sessionId}_${safeName}`;
           gcsUri = await uploadToGCS(tempFilePath, gcsDestination, cleanMime);
+
+          if (!gcsUri) {
+            console.log("[UPLOAD FALLBACK] GCS Upload returned empty. Falling back to Gemini Files API upload...");
+            const fileRef = await ai.files.upload({
+              file: tempFilePath,
+              config: {
+                mimeType: cleanMime,
+                displayName: mediaName || "user_upload",
+              }
+            });
+            geminiFileUri = fileRef.uri || "";
+            console.log(`[UPLOAD FALLBACK] Gemini Files API upload completed. URI: ${geminiFileUri}`);
+          }
         } catch (uploadError: any) {
-          console.error("GCS Upload failed:", uploadError);
-          res.status(400).json({ error: `Failed to upload multimedia file to Cloud Storage: ${cleanErrorMessage(uploadError)}` });
-          return;
+          console.error("GCS Upload failed, attempting Gemini Files fallback...", uploadError);
+          try {
+            const fileRef = await ai.files.upload({
+              file: tempFilePath,
+              config: {
+                mimeType: cleanMime,
+                displayName: mediaName || "user_upload",
+              }
+            });
+            geminiFileUri = fileRef.uri || "";
+            console.log(`[UPLOAD FALLBACK] Gemini Files API upload completed on catch. URI: ${geminiFileUri}`);
+          } catch (geminiErr: any) {
+            console.error("Gemini Files fallback upload failed too:", geminiErr);
+            res.status(400).json({ error: `Failed to upload or process file: ${cleanErrorMessage(geminiErr)}` });
+            return;
+          }
         } finally {
           try {
             if (fs.existsSync(tempFilePath)) {
@@ -784,7 +838,7 @@ app.post("/api/process", async (req, res) => {
         contentsPayload = [
           {
             fileData: {
-              fileUri: gcsUri,
+              fileUri: gcsUri || geminiFileUri,
               mimeType: cleanMime,
             }
           },
@@ -825,6 +879,7 @@ app.post("/api/process", async (req, res) => {
       createdAt: new Date().toISOString(),
       mediaType: mediaType || (sampleType ? 'audio' : 'audio'),
       mediaName: mediaName || "Academic Lecture Study Session",
+      gcsUri: gcsUri || geminiFileUri,
       ...parsedStudySession,
       chatHistory: [
         {
@@ -897,10 +952,17 @@ app.post("/api/upload-file", upload.single("file"), async (req, res) => {
     // Pre-generate session ID and upload file to GCS under tenant account
     const sessionId = "sess_" + Date.now().toString(36);
     const gcsDestination = `audios/${sessionId}_${mediaName}`;
-    const gcsUri = await uploadToGCS(tempFilePath, gcsDestination, cleanMime);
+    
+    let gcsUri = "";
+    try {
+      gcsUri = await uploadToGCS(tempFilePath, gcsDestination, cleanMime);
+    } catch (gcsErr) {
+      console.warn("[GCS WARNING] Failed to upload to GCS, falling back to Gemini Files API:", gcsErr);
+    }
 
     const ai = getGeminiClient();
     let contentsPayload: any[] = [];
+    let geminiFileUri = "";
 
     // Optimize plain-text files by reading them directly on the server (saves File API roundtrips/polling!)
     const isPlainText = cleanMime.startsWith("text/") || mediaName.endsWith(".txt") || mediaName.endsWith(".md") || mediaName.endsWith(".csv") || mediaName.endsWith(".json");
@@ -926,12 +988,31 @@ app.post("/api/upload-file", upload.single("file"), async (req, res) => {
       }];
     } else {
       // PDF or Audio or Video - Process natively via Vertex AI from GCS Uri
-      // Clean up the local temp file since it is now uploaded to GCS securely!
+      if (!gcsUri) {
+        console.log("[UPLOAD-FILE FALLBACK] GCS Upload failed or empty. Attempting Gemini Files API upload...");
+        try {
+          const fileRef = await ai.files.upload({
+            file: tempFilePath,
+            config: {
+              mimeType: cleanMime,
+              displayName: mediaName,
+            }
+          });
+          geminiFileUri = fileRef.uri || "";
+          console.log(`[UPLOAD-FILE FALLBACK] Gemini Files upload successful: ${geminiFileUri}`);
+        } catch (geminiErr: any) {
+          console.error("[UPLOAD-FILE FALLBACK ERROR] Gemini Files upload failed:", geminiErr);
+          res.status(500).json({ error: `File processing failed (both GCS and Gemini Files API uploads failed): ${cleanErrorMessage(geminiErr)}` });
+          return;
+        }
+      }
+
+      // Clean up the local temp file since it is now uploaded to GCS or Gemini Files!
       try {
         if (fs.existsSync(tempFilePath)) {
           fs.unlinkSync(tempFilePath);
         }
-        console.log(`[GCS PROCESO] Temp file cleaned up. Processing via GCS URI: ${gcsUri}`);
+        console.log(`[PROCESO] Temp file cleaned up. Processing via URI: ${gcsUri || geminiFileUri}`);
       } catch (cleanupErr) {
         console.error("Failed to delete temp file:", cleanupErr);
       }
@@ -948,7 +1029,7 @@ app.post("/api/upload-file", upload.single("file"), async (req, res) => {
       contentsPayload = [
         {
           fileData: {
-            fileUri: gcsUri,
+            fileUri: gcsUri || geminiFileUri,
             mimeType: cleanMime,
           }
         },
@@ -999,7 +1080,7 @@ app.post("/api/upload-file", upload.single("file"), async (req, res) => {
       createdAt: new Date().toISOString(),
       mediaType: mediaType || (mimeType.includes("pdf") ? "pdf" : "audio"),
       mediaName: mediaName,
-      gcsUri: gcsUri, // Store GCS URI
+      gcsUri: gcsUri || geminiFileUri, // Store GCS URI
       ...parsedStudySession,
       chatHistory: [
         {
@@ -1101,7 +1182,13 @@ app.post("/api/merge-chunks", async (req, res) => {
     // Pre-generate session ID and upload reassembled file to GCS under tenant account
     const sessionId = "sess_" + Date.now().toString(36);
     const gcsDestination = `audios/${sessionId}_${fileName}`;
-    const gcsUri = await uploadToGCS(mergedFilePath, gcsDestination, mimeType || "");
+    
+    let gcsUri = "";
+    try {
+      gcsUri = await uploadToGCS(mergedFilePath, gcsDestination, mimeType || "");
+    } catch (gcsErr) {
+      console.warn("[GCS WARNING] Failed to upload reassembled file to GCS:", gcsErr);
+    }
 
     // Proactively clean up chunk folder
     try {
@@ -1117,6 +1204,7 @@ app.post("/api/merge-chunks", async (req, res) => {
     // Now, run the actual Gemini analysis on the newly fully-assembled file
     const ai = getGeminiClient();
     let contentsPayload: any[] = [];
+    let geminiFileUri = "";
     const isPlainText = mimeType.startsWith("text/") || fileName.endsWith(".txt") || fileName.endsWith(".md") || fileName.endsWith(".csv") || fileName.endsWith(".json");
 
     if (isPlainText) {
@@ -1139,11 +1227,30 @@ app.post("/api/merge-chunks", async (req, res) => {
       }];
     } else {
       // PDF or Audio or Video - Process natively via Vertex AI from GCS Uri
-      // Clean up the local temp merged file since it is now uploaded to GCS securely!
+      if (!gcsUri) {
+        console.log("[MERGE-CHUNKS FALLBACK] GCS Upload failed or empty. Attempting Gemini Files API upload...");
+        try {
+          const fileRef = await ai.files.upload({
+            file: mergedFilePath,
+            config: {
+              mimeType: mimeType || "",
+              displayName: fileName,
+            }
+          });
+          geminiFileUri = fileRef.uri || "";
+          console.log(`[MERGE-CHUNKS FALLBACK] Gemini Files upload successful: ${geminiFileUri}`);
+        } catch (geminiErr: any) {
+          console.error("[MERGE-CHUNKS FALLBACK ERROR] Gemini Files upload failed:", geminiErr);
+          res.status(500).json({ error: `File processing failed (both GCS and Gemini Files API uploads failed): ${cleanErrorMessage(geminiErr)}` });
+          return;
+        }
+      }
+
+      // Clean up the local temp merged file since it is now uploaded to GCS or Gemini Files securely!
       try {
         if (fs.existsSync(mergedFilePath)) {
           fs.unlinkSync(mergedFilePath);
-          console.log(`[GCS REENSAMBLADO] Temp merged file cleaned up. Processing via GCS URI: ${gcsUri}`);
+          console.log(`[PROCESO REENSAMBLADO] Temp merged file cleaned up. Processing via URI: ${gcsUri || geminiFileUri}`);
         }
       } catch (cleanupErr) {
         console.error("Failed to clean up temp merged file post-upload:", cleanupErr);
@@ -1161,7 +1268,7 @@ app.post("/api/merge-chunks", async (req, res) => {
       contentsPayload = [
         {
           fileData: {
-            fileUri: gcsUri,
+            fileUri: gcsUri || geminiFileUri,
             mimeType: mimeType,
           }
         },
@@ -1211,7 +1318,7 @@ app.post("/api/merge-chunks", async (req, res) => {
       createdAt: new Date().toISOString(),
       mediaType: mediaType || (mimeType.includes("pdf") ? "pdf" : "audio"),
       mediaName: fileName,
-      gcsUri: gcsUri, // Store GCS URI
+      gcsUri: gcsUri || geminiFileUri, // Store GCS URI
       ...parsedStudySession,
       chatHistory: [
         {
@@ -1326,7 +1433,11 @@ app.get("/api/sessions/:id/media", async (req, res, next) => {
     }
 
     const uri = session.gcsUri; // e.g. gs://plaud-own-media-assets/audios/sess_xxx_filename.mp3
-    const pathInBucket = uri.replace(`gs://${BUCKET_NAME}/`, "");
+    if (uri && uri.startsWith("https://generativelanguage.googleapis.com")) {
+      res.status(400).json({ error: "Streaming is not available for files processed via Gemini Files API fallback." });
+      return;
+    }
+    const pathInBucket = uri ? uri.replace(`gs://${BUCKET_NAME}/`, "") : "";
 
     console.log(`[GCS STREAM] Streaming media for session ${id} from gs://${BUCKET_NAME}/${pathInBucket}`);
     const file = storage.bucket(BUCKET_NAME).file(pathInBucket);
