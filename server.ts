@@ -508,7 +508,7 @@ Guidelines:
     });
 
     const response = await ai.models.generateContent({
-      model: "gemini-1.5-flash",
+      model: "gemini-2.0-flash-001",
       contents: formattedContents,
       config: {
         systemInstruction: systemInstruction,
@@ -795,7 +795,7 @@ app.post("/api/process", async (req, res) => {
     }
 
     const response = await ai.models.generateContent({
-      model: "gemini-1.5-flash",
+      model: "gemini-2.0-flash-001",
       contents: contentsPayload,
       config: {
         responseMimeType: "application/json",
@@ -969,7 +969,7 @@ app.post("/api/upload-file", upload.single("file"), async (req, res) => {
 
     console.log("Generating study companion from Gemini...");
     const response = await ai.models.generateContent({
-      model: "gemini-1.5-flash",
+      model: "gemini-2.0-flash-001",
       contents: contentsPayload,
       config: {
         responseMimeType: "application/json",
@@ -1182,7 +1182,7 @@ app.post("/api/merge-chunks", async (req, res) => {
 
     console.log("Generating study companion from Gemini on reassembled dataset...");
     const response = await ai.models.generateContent({
-      model: "gemini-1.5-flash",
+      model: "gemini-2.0-flash-001",
       contents: contentsPayload,
       config: {
         responseMimeType: "application/json",
@@ -1501,7 +1501,7 @@ CRITICAL REQUIREMENT: You MUST automatically detect the language used in the sou
     console.log(`[AI SYNTHESIS] Dispatching compilation request to Gemini for folder "${folder.name}"...`);
     const ai = getGeminiClient();
     const response = await ai.models.generateContent({
-      model: "gemini-1.5-flash",
+      model: "gemini-2.0-flash-001",
       contents: [{ text: prompt }],
       config: {
         temperature: 0.2
