@@ -1576,7 +1576,7 @@ app.use((err: any, req: express.Request, res: express.Response, next: express.Ne
 
 // Serve frontend assets and SPA routes in Express + Vite setup
 async function startServer() {
-  if (process.env.NODE_ENV !== "production") {
+  if (process.env.NODE_ENV === "development") {
     console.log("Starting server in DEVELOPMENT mode with Vite Middleware...");
     const vite = await createViteServer({
       server: { middlewareMode: true },
