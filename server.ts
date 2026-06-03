@@ -93,15 +93,10 @@ function getGeminiClient(): GoogleGenAI {
   const isPlaceholder = !apiKey || apiKey === "MY_GEMINI_API_KEY" || apiKey === "YOUR_GEMINI_API_KEY" || apiKey.trim() === "";
 
   if (!isPlaceholder) {
-    // AQ... keys are Vertex AI Express keys — require vertexai: true (no project/location needed)
-    // AIzaSy... keys are Google AI Studio keys — use apiKey only
-    if (apiKey.startsWith("AQ")) {
-      console.log("[GEMINI CLIENT INIT] Vertex AI Express key detected. Using vertexai: true.");
-      aiClient = new GoogleGenAI({ vertexai: true, apiKey: apiKey });
-    } else {
-      console.log("[GEMINI CLIENT INIT] Google AI Studio key detected.");
-      aiClient = new GoogleGenAI({ apiKey: apiKey });
-    }
+    // AQ... and AIzaSy... keys both work with Google AI Studio (generativelanguage.googleapis.com)
+    // Do NOT use vertexai: true with API keys — this project's org policy blocks Vertex AI API keys
+    console.log("[GEMINI CLIENT INIT] API key detected. Using Google AI Studio endpoint.");
+    aiClient = new GoogleGenAI({ apiKey: apiKey });
   } else {
     console.log("[GEMINI CLIENT INIT] No API Key configured. Using Vertex AI with Application Default Credentials (ADC).");
     aiClient = new GoogleGenAI({
@@ -508,7 +503,7 @@ Guidelines:
     });
 
     const response = await ai.models.generateContent({
-      model: "gemini-2.0-flash-001",
+      model: "gemini-2.5-flash",
       contents: formattedContents,
       config: {
         systemInstruction: systemInstruction,
@@ -795,7 +790,7 @@ app.post("/api/process", async (req, res) => {
     }
 
     const response = await ai.models.generateContent({
-      model: "gemini-2.0-flash-001",
+      model: "gemini-2.5-flash",
       contents: contentsPayload,
       config: {
         responseMimeType: "application/json",
@@ -969,7 +964,7 @@ app.post("/api/upload-file", upload.single("file"), async (req, res) => {
 
     console.log("Generating study companion from Gemini...");
     const response = await ai.models.generateContent({
-      model: "gemini-2.0-flash-001",
+      model: "gemini-2.5-flash",
       contents: contentsPayload,
       config: {
         responseMimeType: "application/json",
@@ -1182,7 +1177,7 @@ app.post("/api/merge-chunks", async (req, res) => {
 
     console.log("Generating study companion from Gemini on reassembled dataset...");
     const response = await ai.models.generateContent({
-      model: "gemini-2.0-flash-001",
+      model: "gemini-2.5-flash",
       contents: contentsPayload,
       config: {
         responseMimeType: "application/json",
@@ -1501,7 +1496,7 @@ CRITICAL REQUIREMENT: You MUST automatically detect the language used in the sou
     console.log(`[AI SYNTHESIS] Dispatching compilation request to Gemini for folder "${folder.name}"...`);
     const ai = getGeminiClient();
     const response = await ai.models.generateContent({
-      model: "gemini-2.0-flash-001",
+      model: "gemini-2.5-flash",
       contents: [{ text: prompt }],
       config: {
         temperature: 0.2
@@ -1614,3 +1609,4 @@ async function startServer() {
 }
 
 startServer();
+
