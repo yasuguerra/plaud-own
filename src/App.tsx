@@ -28,7 +28,7 @@ import {
 
 import { StudySession, ProcessingStatus, ActionItem, Flashcard, ChatMessage, TopicFolder } from "./types";
 import AudioRecorder from "./components/AudioRecorder";
-import { googleProvider, signInWithPopup, signOut, User, initFirebase } from "./firebase";
+import { auth, googleProvider, signInWithPopup, signOut, User, initFirebase } from "./firebase";
 import { onAuthStateChanged } from "firebase/auth";
 import ActionItemsList from "./components/ActionItemsList";
 import FlashcardsDeck from "./components/FlashcardsDeck";
@@ -889,9 +889,8 @@ This workspace was custom-curated in **⚡ Turbo Fast-Track Mode** to bypass bro
                 onClick={async () => {
                   try {
                     setUploadError(null);
-                    const activeAuth = await initFirebase();
-                    if (activeAuth) {
-                      await signInWithPopup(activeAuth, googleProvider);
+                    if (auth) {
+                      await signInWithPopup(auth, googleProvider);
                     }
                   } catch (e: any) {
                     console.error("Login failed:", e);
@@ -1043,9 +1042,8 @@ This workspace was custom-curated in **⚡ Turbo Fast-Track Mode** to bypass bro
                 onClick={async () => {
                   try {
                     setUploadError(null);
-                    const activeAuth = await initFirebase();
-                    if (activeAuth) {
-                      await signInWithPopup(activeAuth, googleProvider);
+                    if (auth) {
+                      await signInWithPopup(auth, googleProvider);
                     }
                   } catch (e: any) {
                     console.error("Login failed:", e);
