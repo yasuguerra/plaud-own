@@ -114,50 +114,138 @@ app.use((err: any, req: express.Request, res: express.Response, next: express.Ne
   next();
 });
 
-// Helper to lazy-retrieve GoogleGenAI client to avoid crashes on startup if key is missing
+// Helper to read and sanitize the configured Gemini API key.
+function getConfiguredApiKey(): string {
+  let apiKey = process.env.GEMINI_API_KEY || "";
+  // Safe trimming and stripping of literal surrounding quotes if any
+  apiKey = apiKey.trim().replace(/^['"]|['"]$/g, "").trim();
+  const isPlaceholder = !apiKey || apiKey === "MY_GEMINI_API_KEY" || apiKey === "YOUR_GEMINI_API_KEY";
+  return isPlaceholder ? "" : apiKey;
+}
+
+// True when a Gemini Developer API key is configured (primary client uses { apiKey }).
+// The Developer API (generativelanguage.googleapis.com) cannot read gs:// URIs — large media
+// must be sent via the Files API (ai.files.upload) instead of Google Cloud Storage.
+function isDeveloperApiMode(): boolean {
+  return !!getConfiguredApiKey();
+}
+
+// Helper to lazy-retrieve the PRIMARY GoogleGenAI client.
+// Both "AIza..." and the newer "AQ..." keys are Gemini Developer API keys
+// (generativelanguage.googleapis.com) and must be used as { apiKey } WITHOUT vertexai.
+// NOTE: An "AQ..." key is NOT a Vertex AI Express key — using vertexai:true with it
+// returns 403 API_KEY_SERVICE_BLOCKED on aiplatform.googleapis.com.
+// When no key is configured, fall back to Vertex AI with Application Default Credentials.
 let aiClient: GoogleGenAI | null = null;
 function getGeminiClient(): GoogleGenAI {
   if (aiClient) return aiClient;
-  let apiKey = process.env.GEMINI_API_KEY || "";
-  
-  // Safe trimming and stripping of literal surrounding quotes if any
-  apiKey = apiKey.trim().replace(/^['"]|['"]$/g, "").trim();
+  const apiKey = getConfiguredApiKey();
 
-  const isPlaceholder = !apiKey || apiKey === "MY_GEMINI_API_KEY" || apiKey === "YOUR_GEMINI_API_KEY" || apiKey.trim() === "";
-
-  if (!isPlaceholder) {
-    // AQ... and AIzaSy... keys both work with Google AI Studio (generativelanguage.googleapis.com)
-    // Do NOT use vertexai: true with API keys — this project's org policy blocks Vertex AI API keys
-    console.log("[GEMINI CLIENT INIT] API key detected. Using Google AI Studio endpoint.");
-    aiClient = new GoogleGenAI({ apiKey: apiKey });
+  if (apiKey) {
+    console.log("[GEMINI CLIENT INIT] API key detected. Using Gemini Developer API.");
+    aiClient = new GoogleGenAI({ apiKey });
   } else {
     console.log("[GEMINI CLIENT INIT] No API Key configured. Using Vertex AI with Application Default Credentials (ADC).");
-    aiClient = new GoogleGenAI({
-      vertexai: true,
-      project: process.env.GOOGLE_CLOUD_PROJECT || "plaud-own",
-      location: process.env.GOOGLE_CLOUD_LOCATION || "us-central1"
-    });
+    aiClient = getAdcClient();
   }
   return aiClient;
 }
 
-function cleanErrorMessage(error: any): string {
-  if (!error) return "An unknown error occurred.";
-  const msg = error.message || String(error);
-  const jsonStr = JSON.stringify(error);
-  
-  if (
-    msg.includes("API Key not found") || 
-    msg.includes("API_KEY_INVALID") || 
-    msg.includes("INVALID_ARGUMENT") ||
-    jsonStr.includes("API_KEY_INVALID") || 
-    jsonStr.includes("API Key not found") ||
-    jsonStr.includes("INVALID_ARGUMENT") ||
-    msg.includes("API key")
-  ) {
-    return "Your Gemini API Key is invalid or has not been configured correctly. Please enter a valid Gemini API Key inside 'Settings > Secrets' (the gear icon on the top-right in AI Studio) and trigger the action again.";
+// Helper to lazy-retrieve a Vertex AI client backed by Application Default Credentials (ADC).
+// Used as an automatic fallback when the primary (API key) client fails with auth errors,
+// and as the primary client in environments like Cloud Run where a service account is available.
+let adcClient: GoogleGenAI | null = null;
+function getAdcClient(): GoogleGenAI {
+  if (adcClient) return adcClient;
+  adcClient = new GoogleGenAI({
+    vertexai: true,
+    project: process.env.GOOGLE_CLOUD_PROJECT || "plaud-own",
+    location: process.env.GOOGLE_CLOUD_LOCATION || "us-central1"
+  });
+  return adcClient;
+}
+
+// Returns true when an error looks like an authentication / authorization / key problem,
+// as opposed to a schema, quota, or upload problem.
+function isAuthError(error: any): boolean {
+  if (!error) return false;
+  const msg = (error.message || String(error)).toLowerCase();
+  const jsonStr = JSON.stringify(error).toLowerCase();
+  const haystack = msg + " " + jsonStr;
+  const status = error.status || error.code;
+  if (status === 401 || status === 403 || status === "UNAUTHENTICATED" || status === "PERMISSION_DENIED") {
+    return true;
   }
-  return msg;
+  return (
+    haystack.includes("api key not found") ||
+    haystack.includes("api_key_invalid") ||
+    haystack.includes("api key not valid") ||
+    haystack.includes("permission_denied") ||
+    haystack.includes("permission denied") ||
+    haystack.includes("unauthenticated") ||
+    haystack.includes("missing authentication") ||
+    haystack.includes("expired") && haystack.includes("token")
+  );
+}
+
+// Runs a Gemini generateContent call with the primary client; if it fails with an auth/permission
+// error, retries ONCE with the ADC-backed Vertex AI client. This lets an AQ Express key work locally
+// while transparently falling back to the Cloud Run service account when keys are missing or rejected.
+async function generateWithFallback(params: any): Promise<any> {
+  const primary = getGeminiClient();
+  try {
+    return await primary.models.generateContent(params);
+  } catch (primaryError: any) {
+    if (!isAuthError(primaryError)) {
+      throw primaryError;
+    }
+    const fallback = getAdcClient();
+    if (fallback === primary) {
+      // Primary already was the ADC client; nothing else to try.
+      throw primaryError;
+    }
+    console.warn("[GEMINI FALLBACK] Primary client auth failed, retrying with Vertex AI ADC. Reason:", primaryError?.message || primaryError);
+    return await fallback.models.generateContent(params);
+  }
+}
+
+// Classifies an error and returns a user-facing message plus an errorType the frontend can branch on.
+// errorType is one of: "AUTH" | "SCHEMA" | "UPLOAD" | "QUOTA" | "GENERIC".
+function classifyError(error: any): { message: string; errorType: string } {
+  if (!error) return { message: "An unknown error occurred.", errorType: "GENERIC" };
+  const msg = error.message || String(error);
+  const haystack = (msg + " " + JSON.stringify(error)).toLowerCase();
+
+  if (isAuthError(error)) {
+    return {
+      errorType: "AUTH",
+      message: "Authentication with Gemini failed. The configured API key or service-account credentials are missing, invalid, or lack access. Verify GEMINI_API_KEY (or the Cloud Run service account) and try again."
+    };
+  }
+  if (haystack.includes("resource_exhausted") || haystack.includes("quota") || haystack.includes("rate limit")) {
+    return {
+      errorType: "QUOTA",
+      message: "Gemini quota or rate limit exceeded. Please wait a moment and try again."
+    };
+  }
+  if (haystack.includes("invalid_argument") || haystack.includes("schema") || haystack.includes("responseschema")) {
+    return {
+      errorType: "SCHEMA",
+      message: `The request to Gemini was rejected as invalid (likely a response-schema or content issue): ${msg}`
+    };
+  }
+  if (haystack.includes("upload") || haystack.includes("gcs") || haystack.includes("storage") || haystack.includes("bucket")) {
+    return {
+      errorType: "UPLOAD",
+      message: `Failed to upload or read the media file: ${msg}`
+    };
+  }
+  return { message: msg, errorType: "GENERIC" };
+}
+
+// Backwards-compatible helper that returns only the message string.
+function cleanErrorMessage(error: any): string {
+  return classifyError(error).message;
 }
 
 function getExtensionFromMimeType(mimeType: string, defaultExt: string = "audio"): string {
@@ -535,7 +623,7 @@ Guidelines:
       parts: [{ text: message }]
     });
 
-    const response = await ai.models.generateContent({
+    const response = await generateWithFallback({
       model: "gemini-2.5-flash",
       contents: formattedContents,
       config: {
@@ -794,7 +882,12 @@ app.post("/api/process", async (req, res) => {
 
           const sessionId = "sess_" + Date.now().toString(36);
           const gcsDestination = `audios/${sessionId}_${safeName}`;
-          gcsUri = await uploadToGCS(tempFilePath, gcsDestination, cleanMime);
+          if (isDeveloperApiMode()) {
+            // Developer API cannot read gs:// URIs — upload via the Files API instead.
+            console.log("[UPLOAD] Developer API mode: routing large file through the Gemini Files API...");
+          } else {
+            gcsUri = await uploadToGCS(tempFilePath, gcsDestination, cleanMime);
+          }
 
           if (!gcsUri) {
             console.log("[UPLOAD FALLBACK] GCS Upload returned empty. Falling back to Gemini Files API upload...");
@@ -822,7 +915,11 @@ app.post("/api/process", async (req, res) => {
             console.log(`[UPLOAD FALLBACK] Gemini Files API upload completed on catch. URI: ${geminiFileUri}`);
           } catch (geminiErr: any) {
             console.error("Gemini Files fallback upload failed too:", geminiErr);
-            res.status(400).json({ error: `Failed to upload or process file: ${cleanErrorMessage(geminiErr)}` });
+            const classified = classifyError(geminiErr);
+            res.status(classified.errorType === "AUTH" ? 401 : 400).json({
+              error: `Failed to upload or process file: ${classified.message}`,
+              errorType: classified.errorType
+            });
             return;
           }
         } finally {
@@ -849,7 +946,7 @@ app.post("/api/process", async (req, res) => {
       }
     }
 
-    const response = await ai.models.generateContent({
+    const response = await generateWithFallback({
       model: "gemini-2.5-flash",
       contents: contentsPayload,
       config: {
@@ -897,7 +994,8 @@ app.post("/api/process", async (req, res) => {
     console.warn("[PROCESS ERROR] Initiating high-fidelity fallback or returning error:", error);
     // If it's a real file upload or written text from the user, do NOT silently fall back to mock data!
     if (!req.body.isSample && req.body.sampleType !== "custom") {
-      res.status(500).json({ error: cleanErrorMessage(error) });
+      const classified = classifyError(error);
+      res.status(classified.errorType === "AUTH" ? 401 : 500).json(classified);
       return;
     }
     try {
@@ -955,7 +1053,12 @@ app.post("/api/upload-file", upload.single("file"), async (req, res) => {
     
     let gcsUri = "";
     try {
-      gcsUri = await uploadToGCS(tempFilePath, gcsDestination, cleanMime);
+      if (isDeveloperApiMode()) {
+        // Developer API cannot read gs:// URIs — the Files API path below will handle the upload.
+        console.log("[UPLOAD-FILE] Developer API mode: routing file through the Gemini Files API...");
+      } else {
+        gcsUri = await uploadToGCS(tempFilePath, gcsDestination, cleanMime);
+      }
     } catch (gcsErr) {
       console.warn("[GCS WARNING] Failed to upload to GCS, falling back to Gemini Files API:", gcsErr);
     }
@@ -1002,7 +1105,11 @@ app.post("/api/upload-file", upload.single("file"), async (req, res) => {
           console.log(`[UPLOAD-FILE FALLBACK] Gemini Files upload successful: ${geminiFileUri}`);
         } catch (geminiErr: any) {
           console.error("[UPLOAD-FILE FALLBACK ERROR] Gemini Files upload failed:", geminiErr);
-          res.status(500).json({ error: `File processing failed (both GCS and Gemini Files API uploads failed): ${cleanErrorMessage(geminiErr)}` });
+          const classified = classifyError(geminiErr);
+          res.status(classified.errorType === "AUTH" ? 401 : 500).json({
+            error: `File processing failed (both GCS and Gemini Files API uploads failed): ${classified.message}`,
+            errorType: classified.errorType
+          });
           return;
         }
       }
@@ -1050,7 +1157,7 @@ app.post("/api/upload-file", upload.single("file"), async (req, res) => {
     }
 
     console.log("Generating study companion from Gemini...");
-    const response = await ai.models.generateContent({
+    const response = await generateWithFallback({
       model: "gemini-2.5-flash",
       contents: contentsPayload,
       config: {
@@ -1096,7 +1203,8 @@ app.post("/api/upload-file", upload.single("file"), async (req, res) => {
 
   } catch (error: any) {
     console.warn("[MULTIPART PROCESS ERROR] Failed to process real file:", error);
-    res.status(500).json({ error: cleanErrorMessage(error) });
+    const classified = classifyError(error);
+    res.status(classified.errorType === "AUTH" ? 401 : 500).json(classified);
   }
 });
 
@@ -1185,7 +1293,12 @@ app.post("/api/merge-chunks", async (req, res) => {
     
     let gcsUri = "";
     try {
-      gcsUri = await uploadToGCS(mergedFilePath, gcsDestination, mimeType || "");
+      if (isDeveloperApiMode()) {
+        // Developer API cannot read gs:// URIs — the Files API path below will handle the upload.
+        console.log("[MERGE-CHUNKS] Developer API mode: routing reassembled file through the Gemini Files API...");
+      } else {
+        gcsUri = await uploadToGCS(mergedFilePath, gcsDestination, mimeType || "");
+      }
     } catch (gcsErr) {
       console.warn("[GCS WARNING] Failed to upload reassembled file to GCS:", gcsErr);
     }
@@ -1241,7 +1354,11 @@ app.post("/api/merge-chunks", async (req, res) => {
           console.log(`[MERGE-CHUNKS FALLBACK] Gemini Files upload successful: ${geminiFileUri}`);
         } catch (geminiErr: any) {
           console.error("[MERGE-CHUNKS FALLBACK ERROR] Gemini Files upload failed:", geminiErr);
-          res.status(500).json({ error: `File processing failed (both GCS and Gemini Files API uploads failed): ${cleanErrorMessage(geminiErr)}` });
+          const classified = classifyError(geminiErr);
+          res.status(classified.errorType === "AUTH" ? 401 : 500).json({
+            error: `File processing failed (both GCS and Gemini Files API uploads failed): ${classified.message}`,
+            errorType: classified.errorType
+          });
           return;
         }
       }
@@ -1289,7 +1406,7 @@ app.post("/api/merge-chunks", async (req, res) => {
     }
 
     console.log("Generating study companion from Gemini on reassembled dataset...");
-    const response = await ai.models.generateContent({
+    const response = await generateWithFallback({
       model: "gemini-2.5-flash",
       contents: contentsPayload,
       config: {
@@ -1334,7 +1451,8 @@ app.post("/api/merge-chunks", async (req, res) => {
 
   } catch (error: any) {
     console.warn("[CHUNK ASSEMBLY PROCESS ERROR] Failed to process reassembled file:", error);
-    res.status(500).json({ error: cleanErrorMessage(error) });
+    const classified = classifyError(error);
+    res.status(classified.errorType === "AUTH" ? 401 : 500).json(classified);
   }
 });
 
@@ -1611,8 +1729,7 @@ Write the entire intelligence report in a professional, beautiful, and highly de
 CRITICAL REQUIREMENT: You MUST automatically detect the language used in the source sessions (e.g. Spanish, English). Write the entire report strictly in that detected language (for example, if the input meetings are in Spanish, the entire report must be in Spanish).`;
 
     console.log(`[AI SYNTHESIS] Dispatching compilation request to Gemini for folder "${folder.name}"...`);
-    const ai = getGeminiClient();
-    const response = await ai.models.generateContent({
+    const response = await generateWithFallback({
       model: "gemini-2.5-flash",
       contents: [{ text: prompt }],
       config: {

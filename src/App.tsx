@@ -152,6 +152,7 @@ export default function App() {
   const [activeTab, setActiveTab] = useState<"summary" | "transcript" | "mindmap" | "flashcards" | "tasks" | "infographics">("summary");
   const [dragOver, setDragOver] = useState(false);
   const [uploadError, setUploadError] = useState<string | null>(null);
+  const [uploadErrorType, setUploadErrorType] = useState<string | null>(null);
   const [isCopingSummary, setIsCopingSummary] = useState(false);
 
   // Folder/Tema management states
@@ -560,6 +561,7 @@ This workspace was custom-curated in **⚡ Turbo Fast-Track Mode** to bypass bro
     customText?: string;
   }) => {
     setUploadError(null);
+    setUploadErrorType(null);
     setProcessingStatus({ stage: "uploading", progress: 5, message: "Ingesting material assets..." });
 
     try {
@@ -594,7 +596,9 @@ This workspace was custom-curated in **⚡ Turbo Fast-Track Mode** to bypass bro
       }
 
       if (!response.ok) {
-        throw new Error(responseData.error || "Materials processing encountered an obstacle");
+        const e = new Error(responseData.error || "Materials processing encountered an obstacle");
+        (e as any).errorType = responseData.errorType;
+        throw e;
       }
 
       const completedSession: StudySession = responseData;
@@ -613,6 +617,7 @@ This workspace was custom-curated in **⚡ Turbo Fast-Track Mode** to bypass bro
     } catch (err: any) {
       console.error("Summarization pipeline fail:", err);
       setUploadError(err.message || "Failed to parse content. Please double check your server secrets settings.");
+      setUploadErrorType(err.errorType || null);
       setProcessingStatus({ stage: "failed", progress: 0, message: "" });
     }
   };
@@ -634,6 +639,7 @@ This workspace was custom-curated in **⚡ Turbo Fast-Track Mode** to bypass bro
   // Send standard multipart upload to ensure robust stateless execution across any scaled instances
   const processStudyFile = async (file: File) => {
     setUploadError(null);
+    setUploadErrorType(null);
     setProcessingStatus({ stage: "uploading", progress: 10, message: "Uploading asset to central workspace..." });
 
     const isAudio = file.type.startsWith("audio/") || file.name.endsWith(".mp3") || file.name.endsWith(".wav") || file.name.endsWith(".m4a") || file.name.endsWith(".ogg");
@@ -679,7 +685,9 @@ This workspace was custom-curated in **⚡ Turbo Fast-Track Mode** to bypass bro
       }
 
       if (!response.ok) {
-        throw new Error(responseData.error || "Material analysis failed. Please check Gemini API config.");
+        const e = new Error(responseData.error || "Material analysis failed. Please check Gemini API config.");
+        (e as any).errorType = responseData.errorType;
+        throw e;
       }
 
       const completedSession: StudySession = responseData;
@@ -705,6 +713,7 @@ This workspace was custom-curated in **⚡ Turbo Fast-Track Mode** to bypass bro
     } catch (err: any) {
       console.error("Stateless upload process failure:", err);
       setUploadError(err.message || "Failed to analyze material. Verify secrets setting.");
+      setUploadErrorType(err.errorType || null);
       setProcessingStatus({ stage: "failed", progress: 0, message: "" });
     }
   };
@@ -1077,7 +1086,8 @@ This workspace was custom-curated in **⚡ Turbo Fast-Track Mode** to bypass bro
           (() => {
             const errStr = uploadError || "";
             const isCookieError = errStr.includes("COOKIE_BLOCKED_ERROR") || errStr.includes("Cookie check") || errStr.includes("non-JSON response: <!doctype html>");
-            const isKeyError = errStr.toLowerCase().includes("api key") || errStr.toLowerCase().includes("apikey") || errStr.toLowerCase().includes("secrets") || errStr.toLowerCase().includes("invalid_argument");
+            // Only show the API-Key configuration screen when the backend explicitly flags an auth error.
+            const isKeyError = uploadErrorType === "AUTH";
             
             return (
               <div className="flex-1 flex items-center justify-center p-8 bg-slate-50 overflow-y-auto">
