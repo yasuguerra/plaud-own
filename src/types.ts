@@ -42,6 +42,9 @@ export interface StudySession {
   chatHistory: ChatMessage[];
   folderId?: string | null; // Topic folder ID association
   gcsUri?: string;           // Google Cloud Storage private URI
+  templateId?: string;       // Plaud-style summary template ID
+  speakerMap?: Record<string, string>; // Maps speaker generic names to real names (e.g. "Speaker 1" -> "Yasu Guerra")
+  localAudioUrl?: string;    // Blob URL for local audio playback
 }
 
 export interface TopicFolder {
@@ -63,5 +66,6 @@ export interface UserProfile {
   email: string;
   displayName: string;
   companyName?: string;
+  frequentSpeakers?: string;
   updatedAt?: string;
 }

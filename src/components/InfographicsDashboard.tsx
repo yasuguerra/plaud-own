@@ -6,6 +6,23 @@ interface InfographicsDashboardProps {
   session: StudySession;
 }
 
+function formatSpeakerName(speaker: string): string {
+  if (!speaker) return "";
+  const clean = speaker.trim().toUpperCase();
+  if (clean === "A" || clean === "SPEAKER A" || clean === "SPEAKER_A") return "Speaker 1";
+  if (clean === "B" || clean === "SPEAKER B" || clean === "SPEAKER_B") return "Speaker 2";
+  if (clean === "C" || clean === "SPEAKER C" || clean === "SPEAKER_C") return "Speaker 3";
+  if (clean === "D" || clean === "SPEAKER D" || clean === "SPEAKER_D") return "Speaker 4";
+  if (clean === "E" || clean === "SPEAKER E" || clean === "SPEAKER_E") return "Speaker 5";
+  if (clean === "F" || clean === "SPEAKER F" || clean === "SPEAKER_F") return "Speaker 6";
+  
+  const numMatch = speaker.match(/speaker[_\s]?(\d+)/i);
+  if (numMatch) {
+    return `Speaker ${numMatch[1]}`;
+  }
+  return speaker;
+}
+
 export default function InfographicsDashboard({ session }: InfographicsDashboardProps) {
   // Parse transcript to calculate Speaker participation dynamically!
   const getSpeakerMetrics = () => {
@@ -23,9 +40,20 @@ export default function InfographicsDashboard({ session }: InfographicsDashboard
       // Matches [MM:SS] Speaker Name: ...
       const match = line.trim().match(/^\[\d{2}:\d{2}(?::\d{2})?\]\s*(.*?):\s*/);
       if (match) {
-        const speaker = match[1].trim();
+        const rawSpeaker = match[1].trim();
+        const speaker = session.speakerMap && session.speakerMap[rawSpeaker] ? session.speakerMap[rawSpeaker] : formatSpeakerName(rawSpeaker);
         counts[speaker] = (counts[speaker] || 0) + 1;
         totalLines++;
+      } else {
+        // Fallback match without timestamp, e.g. "Speaker Name: text"
+        const speakerRegex = /^([^:\n\r]{1,35}):\s*(.*)$/;
+        const lineMatch = line.trim().match(speakerRegex);
+        if (lineMatch) {
+          const rawSpeaker = lineMatch[1].trim();
+          const speaker = session.speakerMap && session.speakerMap[rawSpeaker] ? session.speakerMap[rawSpeaker] : formatSpeakerName(rawSpeaker);
+          counts[speaker] = (counts[speaker] || 0) + 1;
+          totalLines++;
+        }
       }
     });
 

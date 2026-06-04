@@ -2,7 +2,7 @@ import React, { useState, useRef, useEffect } from "react";
 import { Mic, Square, Play, Trash2, CheckCircle2, AlertCircle } from "lucide-react";
 
 interface AudioRecorderProps {
-  onAudioReady: (base64Data: string, mimeType: string, durationSec: number) => void;
+  onAudioReady: (base64Data: string, mimeType: string, durationSec: number, localUrl?: string) => void;
   isProcessing: boolean;
 }
 
@@ -84,7 +84,7 @@ export default function AudioRecorder({ onAudioReady, isProcessing }: AudioRecor
           const resultBase64 = reader.result as string;
           // Extract base64 payload out of DataURL (strips headers like "data:audio/webm;base64,")
           const base64Data = resultBase64.split(",")[1];
-          onAudioReady(base64Data, mimeType, recordingTimeRef.current);
+          onAudioReady(base64Data, mimeType, recordingTimeRef.current, url);
         };
       };
 

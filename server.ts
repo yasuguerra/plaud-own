@@ -6,6 +6,7 @@ import { GoogleGenAI, Type } from "@google/genai";
 import multer from "multer";
 import { Firestore } from "@google-cloud/firestore";
 import { Storage } from "@google-cloud/storage";
+import { getTemplateById } from "./src/templates";
 
 // Explicitly override host environment variables with .env configuration
 dotenv.config();
@@ -73,6 +74,26 @@ async function uploadToGCS(filePath: string, destination: string, mimeType: stri
     console.error("[GCS ERROR] Failed to upload to GCS:", err);
     return "";
   }
+}
+
+async function getUserSpeakerContext(userId: string): Promise<string> {
+  if (!userId || userId === "guest") return "";
+  try {
+    const doc = await firestore.collection("users").doc(userId).get();
+    if (doc.exists) {
+      const data = doc.data();
+      const ownerName = data?.displayName || "";
+      const frequentSpeakers = data?.frequentSpeakers || "";
+      let context = `\n\nWORKSPACE OWNER & PARTICIPANTS CONTEXT:`;
+      if (ownerName) context += `\n- The owner of this workspace/application is: ${ownerName}. Typically, they are speaking when the speaker context matches the owner.`;
+      if (frequentSpeakers) context += `\n- Other frequent participants in these meetings are: ${frequentSpeakers}.`;
+      context += `\n- Analyze the voice styles, self-introductions, direct names called, or textual context in the recording. Identify who is speaking and map the generic speaker diarization IDs (e.g. Speaker A, Speaker B) directly to these real names if they are present or referred to. If they cannot be mapped, leave them as Speaker 1, Speaker 2, etc.`;
+      return context;
+    }
+  } catch (err) {
+    console.error("Failed to read user speaker context from Firestore:", err);
+  }
+  return "";
 }
 
 const app = express();
@@ -590,20 +611,21 @@ app.post("/api/chat", async (req, res) => {
 
     // Prepare system instruction focusing as a friendly, brilliant academic Study Buddy
     const systemInstruction = `You are an expert AI Study Buddy and brilliant academic companion. 
-Your goal is to help the student learn, clarify details, quiz them, and explain concepts simply of the provided material.
-The material belongs to a study session about: "${contextSubject || "Uploaded Lecture Material"}".
+Your goal is to help the user learn, clarify details, and discuss the provided meeting or lecture material.
+The material belongs to a corporate study session or meeting about: "${contextSubject || "Uploaded Lecture Material"}".
 
-Here is the comprehensive summarized core content of this study session for your reference:
+Here is the comprehensive summarized core content and transcript of this session for your reference:
 === BEGIN STUDY MATERIAL CORES ===
 ${contextSummary || "User has not uploaded or generated any material yet. Encourage them to provide an audio/video first, or answer their academic questions generally."}
 === END STUDY MATERIAL CORES ===
 
-Guidelines:
-1. Act encouraging, smart, and concise. Do not use extremely long text blocks unless asked for a profound explanation.
-2. Refer heavily to the specifics in the provided study material, citing sections where suitable.
-3. If they ask a general follow-up question or external questions related to the theme, feel free to explain, but connect it back to the original topic!
-4. Use neat Markdown (headers, bullet points, code blocks) to make your answers beautiful and highly readable.
-5. If the user asks, you can quiz them with a multiple choice question based on the material!`;
+ANTI-HALLUCINATION RULES & GROUNDING CONSTRAINTS (CRITICAL):
+1. Rely EXCLUSIVELY on the provided transcript and summary text above. Never invent decisions, dates, tasks, speakers, agreements, or outcomes not explicitly stated in the context.
+2. If the user asks a question about the meeting that cannot be answered or verified using the provided material, you MUST politely and clearly state that this information was not discussed in the meeting or is not available in the records, rather than guessing or making it up.
+3. Keep all responses strictly grounded in facts. If you aren't sure or if the text is ambiguous, clarify that instead of assuming.
+4. When discussing quotes or events, refer to specific timestamps (e.g. '[00:15]') and use the unifed speaker labels: Speaker 1, Speaker 2, Speaker 3, etc.
+5. Always respond in the SAME language as the user's question (default to Spanish since the client interface and user are using Spanish).
+6. Act smart, helpful, encouraging, and concise. Do not use extremely long text blocks unless explicitly asked for deep explanation.`;
 
     // Map history to the required format for gemini models
     // Chat schema: { role: string, parts: [{ text: string }] }
@@ -727,8 +749,17 @@ const studyResponseSchema = {
 // 3. Process endpoint: transcribes and generates everything (markdown resume, action items, mental map, flashcards)
 app.post("/api/process", async (req, res) => {
   try {
-    const { mediaName, mediaType, base64Data, mimeType, isSample, sampleType, customTitle, customText } = req.body;
+    const { mediaName, mediaType, base64Data, mimeType, isSample, sampleType, customTitle, customText, templateId } = req.body;
+    const userId = (req.headers["x-user-id"] || "guest") as string;
     const ai = getGeminiClient();
+
+    // Fetch user speaker profiles and selected template definitions
+    const speakerContext = await getUserSpeakerContext(userId);
+    const selectedTemplate = getTemplateById(templateId || "client-needs");
+
+    // Dynamic response schema override for selected template structure
+    const currentResponseSchema = JSON.parse(JSON.stringify(studyResponseSchema));
+    currentResponseSchema.properties.summary.description = `A beautifully detailed markdown executive summary structured strictly following the layout, headers, blockquotes, and lists of this template:\n${selectedTemplate.prompt}`;
 
     let contentsPayload: any[] = [];
     let gcsUri = "";
@@ -839,15 +870,15 @@ app.post("/api/process", async (req, res) => {
 
       const contentPromptText = `You are an advanced multimedia processor. Carefully analyze this uploaded ${mediaType || 'lecture media'} file: "${mediaName || 'Lecture Recording'}".
       Please listen to the audio carefully and transcribe or reconstruct the exact narrative flow as the transcript, timestamping key changes.
-      Then, generate a comprehensive study study session including:
+      Then, generate a comprehensive study session including:
       1. An academic and professional title.
-      2. A beautiful detailed summary/resume in formatted Markdown.
+      2. A beautiful detailed summary/resume in formatted Markdown based on the template layout: "${selectedTemplate.name}".
       3. A complete timestamped narrative transcript or detailed chapter layout.
       4. Structured follow-up Action Items.
       5. A highly descriptive Mind Map concept hierarchy matching the MindMapNode schema structure.
       6. Five to seven highly engaging study flashcards testing main concept outcomes.
       
-      Generate fully populated and valid results in JSON format according to the supplied responseSchema.
+      Generate fully populated and valid results in JSON format according to the supplied responseSchema.${speakerContext}
       
       CRITICAL REQUIREMENT: You MUST automatically detect the language spoken or written in the source audio/video/document (e.g. Spanish, English). All generated text fields (title, summary, transcript, actionItems, mindMap, flashcards) MUST be entirely in that detected language. Do not translate the content; write it fully in the detected language (for example, if the input is in Spanish, everything must be in Spanish).`;
 
@@ -951,7 +982,7 @@ app.post("/api/process", async (req, res) => {
       contents: contentsPayload,
       config: {
         responseMimeType: "application/json",
-        responseSchema: studyResponseSchema,
+        responseSchema: currentResponseSchema,
         temperature: 0.2 // lowers random outputs for predictable study mapping formats
       }
     });
@@ -1037,7 +1068,7 @@ app.post("/api/upload-file", upload.single("file"), async (req, res) => {
       return;
     }
 
-    const { mediaType } = req.body;
+    const { mediaType, templateId } = req.body;
     const mediaName = file.originalname || "Uploaded Material";
     const mimeType = file.mimetype || "";
     const tempFilePath = file.path;
@@ -1046,6 +1077,14 @@ app.post("/api/upload-file", upload.single("file"), async (req, res) => {
     console.log(`[MULTIPART UPLOAD] processing: Name: ${mediaName}, Mime: ${mimeType} (cleaned: ${cleanMime}), Size: ${Math.round(file.size / 1024 / 1024)}MB`);
 
     const userId = (req.headers["x-user-id"] || "guest") as string;
+
+    // Fetch user speaker profiles and selected template definitions
+    const speakerContext = await getUserSpeakerContext(userId);
+    const selectedTemplate = getTemplateById(templateId || "client-needs");
+
+    // Dynamic response schema override for selected template structure
+    const currentResponseSchema = JSON.parse(JSON.stringify(studyResponseSchema));
+    currentResponseSchema.properties.summary.description = `A beautifully detailed markdown executive summary structured strictly following the layout, headers, blockquotes, and lists of this template:\n${selectedTemplate.prompt}`;
 
     // Pre-generate session ID and upload file to GCS under tenant account
     const sessionId = "sess_" + Date.now().toString(36);
@@ -1145,11 +1184,13 @@ app.post("/api/upload-file", upload.single("file"), async (req, res) => {
           
           Generate fully populated and valid results in JSON format according to the supplied responseSchema:
           1. An academic and professional title.
-          2. A beautiful detailed summary/resume in formatted Markdown.
+          2. A beautiful detailed summary/resume in formatted Markdown based on the template layout: "${selectedTemplate.name}".
           3. A complete timestamped narrative transcript or detailed chapter layout.
           4. Structured follow-up Action Items.
           5. A highly descriptive Mind Map concept hierarchy matching the MindMapNode schema structure.
           6. Five to seven highly engaging study flashcards testing main concept outcomes.
+          
+          Generate fully populated and valid results in JSON format according to the supplied responseSchema.${speakerContext}
           
           CRITICAL REQUIREMENT: You MUST automatically detect the language spoken or written in the source audio/video/document (e.g. Spanish, English). All generated text fields (title, summary, transcript, actionItems, mindMap, flashcards) MUST be entirely in that detected language. Do not translate the content; write it fully in the detected language (for example, if the input is in Spanish, everything must be in Spanish).`
         }
@@ -1162,7 +1203,7 @@ app.post("/api/upload-file", upload.single("file"), async (req, res) => {
       contents: contentsPayload,
       config: {
         responseMimeType: "application/json",
-        responseSchema: studyResponseSchema,
+        responseSchema: currentResponseSchema,
         temperature: 0.2
       }
     });

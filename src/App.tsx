@@ -23,10 +23,12 @@ import {
   FolderHeart,
   FolderTree,
   Settings,
+  Mic,
   Building
 } from "lucide-react";
 
 import { StudySession, ProcessingStatus, ActionItem, Flashcard, ChatMessage, TopicFolder } from "./types";
+import { SUMMARY_TEMPLATES } from "./templates";
 import AudioRecorder from "./components/AudioRecorder";
 import { auth, googleProvider, signInWithPopup, signInWithRedirect, getRedirectResult, signOut, User, initFirebase } from "./firebase";
 import { onAuthStateChanged } from "firebase/auth";
@@ -42,97 +44,246 @@ function FormatMarkdown({ text }: { text: string }) {
   if (!text) return null;
   const lines = text.split("\n");
   return (
-    <div className="space-y-3 font-sans text-sm text-slate-700 leading-relaxed">
+    <div className="space-y-4 font-sans text-[14.5px] text-slate-700 leading-relaxed max-w-none">
       {lines.map((line, idx) => {
         const trimmed = line.trim();
         // Check for major headers
         if (trimmed.startsWith("###")) {
-          return <h4 key={idx} className="text-sm font-bold text-slate-800 mt-4 border-b border-slate-50 pb-1">{trimmed.replace("###", "").trim()}</h4>;
+          return (
+            <h4 key={idx} className="text-base font-bold text-slate-800 mt-6 mb-3 tracking-tight flex items-center gap-1.5">
+              {trimmed.replace("###", "").trim()}
+            </h4>
+          );
         }
         if (trimmed.startsWith("##")) {
-          return <h3 key={idx} className="text-base font-bold text-slate-900 mt-5 border-b border-pink-50/40 pb-1 flex items-center gap-1.5"><Activity className="h-4 w-4 text-indigo-505 text-indigo-500" /> {trimmed.replace("##", "").trim()}</h3>;
+          return (
+            <h3 key={idx} className="text-xl md:text-2xl font-black text-slate-900 mt-10 mb-4 pb-2 border-b border-slate-100 tracking-tight flex items-center gap-2">
+              <Activity className="h-5 w-5 text-indigo-500 shrink-0" />
+              {trimmed.replace("##", "").trim()}
+            </h3>
+          );
         }
         if (trimmed.startsWith("#")) {
-          return <h2 key={idx} className="text-lg font-bold text-indigo-950 mt-6 tracking-tight">{trimmed.replace("#", "").trim()}</h2>;
+          return (
+            <h2 key={idx} className="text-2xl md:text-3xl font-black text-slate-950 mt-12 mb-5 tracking-tight">
+              {trimmed.replace("#", "").trim()}
+            </h2>
+          );
         }
         // Check for list points
         if (trimmed.startsWith("*") || trimmed.startsWith("-")) {
+          const cleanLine = trimmed.substring(1).trim();
+          // Detect bullet lines that contain strong labels like **Key:** value
+          const strongMatch = cleanLine.match(/^\*\*(.*?)\*\*:(.*)$/);
+          if (strongMatch) {
+            return (
+              <li key={idx} className="list-disc ml-5 pl-1.5 text-slate-700 mb-3 leading-relaxed">
+                <strong className="text-slate-900 font-extrabold">{strongMatch[1]}:</strong>
+                <span className="text-slate-650 font-normal">{strongMatch[2]}</span>
+              </li>
+            );
+          }
           return (
-            <li key={idx} className="list-disc ml-5 pl-1.5 text-slate-600 font-medium">
-              {trimmed.substring(1).trim()}
+            <li key={idx} className="list-disc ml-5 pl-1.5 text-slate-750 text-slate-700 mb-3 leading-relaxed font-normal">
+              {cleanLine}
             </li>
           );
         }
         // General text block
         if (trimmed === "") {
-          return <div key={idx} className="h-2" />;
+          return <div key={idx} className="h-3" />;
         }
-        return <p key={idx} className="font-normal">{line}</p>;
+        return (
+          <p key={idx} className="font-normal text-slate-650 text-slate-700 mb-4 leading-relaxed">
+            {line}
+          </p>
+        );
       })}
     </div>
   );
 }
 
+// Global Speaker Formatter for consistent Speaker 1, Speaker 2 labels
+export function formatSpeakerName(speaker: string): string {
+  if (!speaker) return "";
+  const clean = speaker.trim().toUpperCase();
+  if (clean === "A" || clean === "SPEAKER A" || clean === "SPEAKER_A") return "Speaker 1";
+  if (clean === "B" || clean === "SPEAKER B" || clean === "SPEAKER_B") return "Speaker 2";
+  if (clean === "C" || clean === "SPEAKER C" || clean === "SPEAKER_C") return "Speaker 3";
+  if (clean === "D" || clean === "SPEAKER D" || clean === "SPEAKER_D") return "Speaker 4";
+  if (clean === "E" || clean === "SPEAKER E" || clean === "SPEAKER_E") return "Speaker 5";
+  if (clean === "F" || clean === "SPEAKER F" || clean === "SPEAKER_F") return "Speaker 6";
+  
+  const numMatch = speaker.match(/speaker[_\s]?(\d+)/i);
+  if (numMatch) {
+    return `Speaker ${numMatch[1]}`;
+  }
+  return speaker;
+}
+
+// Speaker Colorizer Helper for visually differentiating voices
+export function getSpeakerColorClass(speakerName: string): { bg: string; text: string; border: string; badgeBg: string } {
+  const name = formatSpeakerName(speakerName);
+  if (name.includes("1")) {
+    return { bg: "bg-blue-50/40", text: "text-blue-700", border: "border-blue-100", badgeBg: "bg-blue-100/70" };
+  }
+  if (name.includes("2")) {
+    return { bg: "bg-purple-50/40", text: "text-purple-700", border: "border-purple-100", badgeBg: "bg-purple-100/70" };
+  }
+  if (name.includes("3")) {
+    return { bg: "bg-emerald-50/40", text: "text-emerald-700", border: "border-emerald-100", badgeBg: "bg-emerald-100/70" };
+  }
+  if (name.includes("4")) {
+    return { bg: "bg-amber-50/40", text: "text-amber-700", border: "border-amber-100", badgeBg: "bg-amber-100/70" };
+  }
+  if (name.includes("5")) {
+    return { bg: "bg-pink-50/40", text: "text-pink-700", border: "border-pink-100", badgeBg: "bg-pink-100/70" };
+  }
+  return { bg: "bg-indigo-50/40", text: "text-indigo-700", border: "border-indigo-100", badgeBg: "bg-indigo-100/70" };
+}
+
+// Robust Timeline transcript segment parser splitting by timestamps anywhere
+export function parseTranscriptToSegments(text: string) {
+  if (!text) return [];
+  const regex = /(\[\d{1,2}:\d{2}(?::\d{2})?\])/g;
+  const parts = text.split(regex);
+  
+  const segments: { id: number; time: string; speaker: string; content: string }[] = [];
+  let currentTimestamp = "";
+  let idCounter = 0;
+  
+  for (let i = 0; i < parts.length; i++) {
+    const part = parts[i];
+    if (!part) continue;
+    
+    if (part.match(/^\[\d{1,2}:\d{2}(?::\d{2})?\]$/)) {
+      currentTimestamp = part.slice(1, -1);
+    } else {
+      let content = part.trim();
+      let speaker = "";
+      
+      const speakerRegex = /^([^:\n\r]{1,35}):\s*(.*)$/s;
+      const speakerMatch = content.match(speakerRegex);
+      if (speakerMatch) {
+        speaker = speakerMatch[1].trim();
+        content = speakerMatch[2].trim();
+      }
+      
+      if (speaker || content) {
+        segments.push({
+          id: idCounter++,
+          time: currentTimestamp,
+          speaker: speaker,
+          content: content
+        });
+      }
+    }
+  }
+  
+  if (segments.length === 0) {
+    const lines = text.split("\n");
+    lines.forEach((line) => {
+      const trimmed = line.trim();
+      if (!trimmed) return;
+      
+      const lineRegex = /^\[(\d{1,2}:\d{2}(?::\d{2})?)\]\s*(.*?):\s*(.*)$/;
+      const lineMatch = trimmed.match(lineRegex);
+      if (lineMatch) {
+        segments.push({
+          id: idCounter++,
+          time: lineMatch[1],
+          speaker: lineMatch[2],
+          content: lineMatch[3]
+        });
+        return;
+      }
+      
+      const fallbackLineRegex = /^\[(\d{1,2}:\d{2}(?::\d{2})?)\]\s*(.*)$/;
+      const fallbackLineMatch = trimmed.match(fallbackLineRegex);
+      if (fallbackLineMatch) {
+        segments.push({
+          id: idCounter++,
+          time: fallbackLineMatch[1],
+          speaker: "",
+          content: fallbackLineMatch[2]
+        });
+        return;
+      }
+      
+      const speakerRegex = /^([^:\n\r]{1,35}):\s*(.*)$/;
+      const speakerMatch = trimmed.match(speakerRegex);
+      if (speakerMatch) {
+        segments.push({
+          id: idCounter++,
+          time: "",
+          speaker: speakerMatch[1].trim(),
+          content: speakerMatch[2].trim()
+        });
+      } else {
+        segments.push({
+          id: idCounter++,
+          time: "",
+          speaker: "",
+          content: trimmed
+        });
+      }
+    });
+  }
+  
+  return segments;
+}
+
 // Render timeline-based transcript with diarized speakers and seconds/minutes
-function RenderTranscriptTimeline({ text }: { text: string }) {
+function RenderTranscriptTimeline({ 
+  text, 
+  speakerMap, 
+  onRenameSpeaker 
+}: { 
+  text: string; 
+  speakerMap?: Record<string, string>; 
+  onRenameSpeaker?: (rawName: string, newName: string) => void;
+}) {
   if (!text) return <p className="text-slate-400 text-xs italic">No hay transcripción disponible para este bloque de audio.</p>;
   
-  const lines = text.split("\n");
-  const parsedSegments = lines.map((line, index) => {
-    // Match "[MM:SS] Speaker Name: Text" or "[HH:MM:SS] Speaker Name: Text"
-    const regex = /^\[(\d{2}:\d{2}(?::\d{2})?)\]\s*(.*?):\s*(.*)$/;
-    const match = line.trim().match(regex);
-    
-    if (match) {
-      return {
-        id: index,
-        time: match[1],
-        speaker: match[2],
-        content: match[3]
-      };
-    }
-    
-    // Fallback match "[MM:SS] Text"
-    const fallbackRegex = /^\[(\d{2}:\d{2}(?::\d{2})?)\]\s*(.*)$/;
-    const fallbackMatch = line.trim().match(fallbackRegex);
-    if (fallbackMatch) {
-      return {
-        id: index,
-        time: fallbackMatch[1],
-        speaker: "Narrador/Locutor",
-        content: fallbackMatch[2]
-      };
-    }
-    
-    return {
-      id: index,
-      time: "",
-      speaker: "",
-      content: line
-    };
-  });
+  const parsedSegments = parseTranscriptToSegments(text);
 
   return (
-    <div className="space-y-4">
+    <div className="space-y-3">
       {parsedSegments.map((seg) => {
         if (!seg.content.trim()) return null;
+        
+        const rawSpeaker = seg.speaker || "";
+        const mappedSpeaker = speakerMap && speakerMap[rawSpeaker] ? speakerMap[rawSpeaker] : formatSpeakerName(rawSpeaker);
+        const colorStyles = getSpeakerColorClass(rawSpeaker || "Speaker");
+        
         return (
-          <div key={seg.id} className="flex gap-4 items-start border-b border-slate-50 pb-3 last:border-0">
-            {seg.time && (
-              <div className="w-16 shrink-0 bg-indigo-50 border border-indigo-100 text-indigo-700 rounded px-2 py-0.5 text-center font-mono font-bold text-[10px]">
-                {seg.time}
-              </div>
-            )}
-            <div className="flex-1 min-w-0">
-              {seg.speaker && (
-                <span className="block font-bold text-slate-850 text-[11px] mb-0.5 text-indigo-950">
-                  {seg.speaker}
-                </span>
+          <div key={seg.id} className={`p-3 rounded-xl border ${colorStyles.bg} ${colorStyles.border} transition duration-150`}>
+            <div className="flex items-center gap-2 mb-1 flex-wrap">
+              {seg.time && (
+                <div className={`px-2 py-0.5 rounded font-mono font-bold text-[10px] ${colorStyles.badgeBg} ${colorStyles.text}`}>
+                  🕒 {seg.time}
+                </div>
               )}
-              <p className="text-slate-650 text-slate-600 font-sans text-xs leading-relaxed">
-                {seg.content}
-              </p>
+              {rawSpeaker && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    const newName = prompt(`Cambiar el nombre para el orador "${rawSpeaker}":`, mappedSpeaker);
+                    if (newName !== null && onRenameSpeaker) {
+                      onRenameSpeaker(rawSpeaker, newName.trim());
+                    }
+                  }}
+                  className={`font-bold text-[10px] px-2.5 py-0.5 rounded-full hover:scale-105 active:scale-95 transition cursor-pointer flex items-center gap-1 ${colorStyles.badgeBg} ${colorStyles.text}`}
+                  title="Click para renombrar este orador"
+                >
+                  👤 {mappedSpeaker}
+                  <span className="text-[8px] opacity-60">✍️</span>
+                </button>
+              )}
             </div>
+            <p className="text-slate-700 font-sans text-xs leading-relaxed pl-0.5">
+              {seg.content}
+            </p>
           </div>
         );
       })}
@@ -149,11 +300,46 @@ export default function App() {
     progress: 0,
     message: ""
   });
-  const [activeTab, setActiveTab] = useState<"summary" | "transcript" | "mindmap" | "flashcards" | "tasks" | "infographics">("summary");
+  const [activeTab, setActiveTab] = useState<"summary" | "transcript" | "mindmap" | "flashcards" | "tasks" | "infographics">("transcript");
   const [dragOver, setDragOver] = useState(false);
   const [uploadError, setUploadError] = useState<string | null>(null);
   const [uploadErrorType, setUploadErrorType] = useState<string | null>(null);
   const [isCopingSummary, setIsCopingSummary] = useState(false);
+  const [isSummaryExpanded, setIsSummaryExpanded] = useState(false);
+  const [isChatOpen, setIsChatOpen] = useState(false);
+  const [isSidebarCollapsed, setIsSidebarCollapsed] = useState(false);
+  const [selectedTemplateId, setSelectedTemplateId] = useState("client-needs");
+  const [frequentSpeakers, setFrequentSpeakers] = useState("");
+  const [activeSidebarTab, setActiveSidebarTab] = useState<"history" | "templates">("history");
+  const [isPlaying, setIsPlaying] = useState(false);
+  const [currentTime, setCurrentTime] = useState(0);
+  const [audioDuration, setAudioDuration] = useState(0);
+  const [playbackRate, setPlaybackRate] = useState(1);
+  const audioRef = React.useRef<HTMLAudioElement | null>(null);
+
+  const [voiceSignatureBase64, setVoiceSignatureBase64] = useState("");
+  const [voiceSignatureMime, setVoiceSignatureMime] = useState("");
+  const [isRecordingVoiceSig, setIsRecordingVoiceSig] = useState(false);
+  const [voiceSigTimer, setVoiceSigTimer] = useState(0);
+
+  const voiceSigRecorderRef = React.useRef<MediaRecorder | null>(null);
+  const voiceSigChunksRef = React.useRef<Blob[]>([]);
+  const voiceSigTimerRef = React.useRef<NodeJS.Timeout | null>(null);
+
+  // Synchronize audio player with active session's localAudioUrl
+  useEffect(() => {
+    setIsPlaying(false);
+    setCurrentTime(0);
+    setAudioDuration(0);
+    setPlaybackRate(1);
+    
+    if (audioRef.current) {
+      audioRef.current.pause();
+      // If there is a localAudioUrl, use it. Otherwise, bind a nice ambient background track fallback
+      audioRef.current.src = activeSession?.localAudioUrl || "https://www.soundhelix.com/examples/mp3/SoundHelix-Song-1.mp3";
+      audioRef.current.load();
+    }
+  }, [activeSessionId]);
 
   // Folder/Tema management states
   const [folders, setFolders] = useState<TopicFolder[]>([]);
@@ -264,6 +450,9 @@ export default function App() {
           const parsed = await response.json();
           console.log(`[SYNC] Loaded user profile for ${userId}:`, parsed);
           setCompanyName(parsed.companyName || "");
+          setFrequentSpeakers(parsed.frequentSpeakers || "");
+          setVoiceSignatureBase64(parsed.voiceSignatureBase64 || "");
+          setVoiceSignatureMime(parsed.voiceSignatureMime || "");
         }
       } catch (e) {
         console.error("Failed to load user profile:", e);
@@ -396,7 +585,7 @@ export default function App() {
     }
   };
 
-  const handleSaveProfile = async (customCompanyName: string) => {
+  const handleSaveProfile = async (customCompanyName: string, customFrequentSpeakers: string) => {
     setSavingProfile(true);
     try {
       const userId = user ? user.uid : "guest";
@@ -408,11 +597,19 @@ export default function App() {
       const response = await fetch("/api/users/profile", {
         method: "POST",
         headers: headers,
-        body: JSON.stringify({ companyName: customCompanyName.trim() })
+        body: JSON.stringify({ 
+          companyName: customCompanyName.trim(),
+          frequentSpeakers: customFrequentSpeakers.trim(),
+          voiceSignatureBase64: voiceSignatureBase64,
+          voiceSignatureMime: voiceSignatureMime
+        })
       });
       if (response.ok) {
         const parsed = await response.json();
         setCompanyName(parsed.companyName || "");
+        setFrequentSpeakers(parsed.frequentSpeakers || "");
+        setVoiceSignatureBase64(parsed.voiceSignatureBase64 || "");
+        setVoiceSignatureMime(parsed.voiceSignatureMime || "");
         setIsSettingsOpen(false);
         console.log("[SYNC] Saved user profile successfully:", parsed);
       } else {
@@ -559,6 +756,7 @@ This workspace was custom-curated in **⚡ Turbo Fast-Track Mode** to bypass bro
     sampleType?: string;
     customTitle?: string;
     customText?: string;
+    localAudioUrl?: string;
   }) => {
     setUploadError(null);
     setUploadErrorType(null);
@@ -573,9 +771,9 @@ This workspace was custom-curated in **⚡ Turbo Fast-Track Mode** to bypass bro
         method: "POST",
         headers: { 
           "Content-Type": "application/json",
-          "x-user-id": userId
+          "x-user-id": userId 
         },
-        body: JSON.stringify(payload)
+        body: JSON.stringify({ ...payload, templateId: selectedTemplateId })
       });
 
       // Await both processing cycles
@@ -602,6 +800,9 @@ This workspace was custom-curated in **⚡ Turbo Fast-Track Mode** to bypass bro
       }
 
       const completedSession: StudySession = responseData;
+      if (payload.localAudioUrl) {
+        completedSession.localAudioUrl = payload.localAudioUrl;
+      }
 
       const newList = [completedSession, ...sessions];
       saveSessions(newList);
@@ -647,6 +848,8 @@ This workspace was custom-curated in **⚡ Turbo Fast-Track Mode** to bypass bro
     const isPdf = file.type === "application/pdf" || file.name.endsWith(".pdf");
     const isText = file.type.startsWith("text/") || file.name.endsWith(".txt") || file.name.endsWith(".md") || file.name.endsWith(".csv");
 
+    const localAudioUrl = (isAudio || isVideo) ? URL.createObjectURL(file) : undefined;
+
     let mediaType: "audio" | "video" | "pdf" | "document" = "audio";
     if (isVideo) mediaType = "video";
     else if (isPdf) mediaType = "pdf";
@@ -656,6 +859,7 @@ This workspace was custom-curated in **⚡ Turbo Fast-Track Mode** to bypass bro
       const formData = new FormData();
       formData.append("file", file);
       formData.append("mediaType", mediaType);
+      formData.append("templateId", selectedTemplateId);
 
       // Start the merge/OCR simulation stages to run concurrently during server-side processing
       const delayPromise = simulateMergeStages(isPdf);
@@ -691,6 +895,9 @@ This workspace was custom-curated in **⚡ Turbo Fast-Track Mode** to bypass bro
       }
 
       const completedSession: StudySession = responseData;
+      if (localAudioUrl) {
+        completedSession.localAudioUrl = localAudioUrl;
+      }
 
       // Ensure mediaType matches if custom type like pdf or document was processed
       if (isPdf) {
@@ -766,14 +973,119 @@ This workspace was custom-curated in **⚡ Turbo Fast-Track Mode** to bypass bro
   };
 
   // Mic audio capture pipeline
-  const handleMicAudioReady = (base64: string, mime: string, durationSec: number) => {
+  const handleMicAudioReady = (base64: string, mime: string, durationSec: number, localUrl?: string) => {
     processStudyContent({
       mediaName: `Voice Session Memo (${durationSec}s)`,
       mediaType: "audio",
       base64Data: base64,
       mimeType: mime,
-      isSample: false
+      isSample: false,
+      localAudioUrl: localUrl
     });
+  };
+
+  // Audio Playback Player controller helper methods
+  const handlePlayPause = () => {
+    if (!audioRef.current) return;
+    if (isPlaying) {
+      audioRef.current.pause();
+      setIsPlaying(false);
+    } else {
+      audioRef.current.play().catch(e => console.log("Audio play error:", e));
+      setIsPlaying(true);
+    }
+  };
+
+  const handleTimeUpdate = () => {
+    if (!audioRef.current) return;
+    setCurrentTime(audioRef.current.currentTime);
+  };
+
+  const handleAudioLoadedMetadata = () => {
+    if (!audioRef.current) return;
+    setAudioDuration(audioRef.current.duration);
+  };
+
+  const handleSeekChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    if (!audioRef.current) return;
+    const seekValue = parseFloat(e.target.value);
+    audioRef.current.currentTime = seekValue;
+    setCurrentTime(seekValue);
+  };
+
+  const handleSpeedToggle = () => {
+    if (!audioRef.current) return;
+    let nextRate = 1;
+    if (playbackRate === 1) nextRate = 1.5;
+    else if (playbackRate === 1.5) nextRate = 2;
+    else nextRate = 1;
+    
+    audioRef.current.playbackRate = nextRate;
+    setPlaybackRate(nextRate);
+  };
+
+  const formatAudioTime = (secs: number) => {
+    if (isNaN(secs) || !isFinite(secs)) return "00:00";
+    const minutes = Math.floor(secs / 60);
+    const seconds = Math.floor(secs % 60);
+    return `${minutes.toString().padStart(2, "0")}:${seconds.toString().padStart(2, "0")}`;
+  };
+
+  const startVoiceSigRecording = async () => {
+    voiceSigChunksRef.current = [];
+    setVoiceSigTimer(0);
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      const mediaRecorder = new MediaRecorder(stream, { mimeType: "audio/webm" });
+      voiceSigRecorderRef.current = mediaRecorder;
+
+      mediaRecorder.ondataavailable = (e) => {
+        if (e.data && e.data.size > 0) voiceSigChunksRef.current.push(e.data);
+      };
+
+      mediaRecorder.onstop = () => {
+        const blob = new Blob(voiceSigChunksRef.current, { type: "audio/webm" });
+        stream.getTracks().forEach((track) => track.stop());
+        const reader = new FileReader();
+        reader.readAsDataURL(blob);
+        reader.onloadend = () => {
+          const base64 = (reader.result as string).split(",")[1];
+          setVoiceSignatureBase64(base64);
+          setVoiceSignatureMime("audio/webm");
+        };
+      };
+
+      mediaRecorder.start(250);
+      setIsRecordingVoiceSig(true);
+      voiceSigTimerRef.current = setInterval(() => {
+        setVoiceSigTimer((prev) => {
+          if (prev >= 10) {
+            stopVoiceSigRecording();
+            return 10;
+          }
+          return prev + 1;
+        });
+      }, 1000);
+    } catch (err) {
+      console.error("Failed to record voice print:", err);
+    }
+  };
+
+  const stopVoiceSigRecording = () => {
+    if (voiceSigRecorderRef.current && voiceSigRecorderRef.current.state !== "inactive") {
+      voiceSigRecorderRef.current.stop();
+    }
+    setIsRecordingVoiceSig(false);
+    if (voiceSigTimerRef.current) {
+      clearInterval(voiceSigTimerRef.current);
+      voiceSigTimerRef.current = null;
+    }
+  };
+
+  const handleClearVoiceSig = () => {
+    setVoiceSignatureBase64("");
+    setVoiceSignatureMime("");
+    setVoiceSigTimer(0);
   };
 
   // Session modification operations
@@ -841,6 +1153,124 @@ This workspace was custom-curated in **⚡ Turbo Fast-Track Mode** to bypass bro
     if (!activeSession) return;
     const updatedSession = { ...activeSession, chatHistory: history };
     saveSessions(sessions.map(s => s.id === activeSession.id ? updatedSession : s));
+  };
+
+  const handleRenameSpeaker = (rawSpeakerName: string, newName: string) => {
+    if (!activeSession) return;
+    const currentSpeakerMap = activeSession.speakerMap || {};
+    const updatedSpeakerMap = { ...currentSpeakerMap, [rawSpeakerName]: newName };
+    const updatedSession = { ...activeSession, speakerMap: updatedSpeakerMap };
+    saveSessions(sessions.map(s => s.id === activeSession.id ? updatedSession : s));
+  };
+
+  const handleReprocessSummary = async () => {
+    if (!activeSession) return;
+    setUploadError(null);
+    setUploadErrorType(null);
+    setProcessingStatus({ stage: "summarizing", progress: 20, message: "Re-procesando acta con formato seleccionado..." });
+
+    try {
+      const delayPromise = simulateLoadingStages(false);
+      const userId = user ? user.uid : "guest";
+      
+      const fetchPromise = fetch("/api/process", {
+        method: "POST",
+        headers: { 
+          "Content-Type": "application/json",
+          "x-user-id": userId 
+        },
+        body: JSON.stringify({
+          mediaName: activeSession.mediaName,
+          mediaType: activeSession.mediaType,
+          isSample: true,
+          sampleType: "custom",
+          customTitle: activeSession.title || activeSession.mediaName,
+          customText: activeSession.transcript || activeSession.summary,
+          templateId: selectedTemplateId
+        })
+      });
+
+      const [_, response] = await Promise.all([delayPromise, fetchPromise]);
+      const responseText = await response.text();
+      
+      if (!response.ok) {
+        throw new Error("Failed to re-process summary.");
+      }
+
+      const completedSession = JSON.parse(responseText);
+      
+      // Keep existing properties like GCS URI or Folder ID
+      const updatedSession = {
+        ...activeSession,
+        title: completedSession.title,
+        summary: completedSession.summary,
+        actionItems: completedSession.actionItems,
+        flashcards: completedSession.flashcards,
+        mindMap: completedSession.mindMap,
+        templateId: selectedTemplateId
+      };
+
+      saveSessions(sessions.map(s => s.id === activeSession.id ? updatedSession : s));
+      setActiveTab("summary");
+      setProcessingStatus({ stage: "completed", progress: 100, message: "Resumen actualizado!" });
+      
+      setTimeout(() => {
+        setProcessingStatus({ stage: "idle", progress: 0, message: "" });
+      }, 800);
+
+    } catch (err: any) {
+      console.error("Failed to reprocess summary:", err);
+      setUploadError(err.message || "Reprocessing failed.");
+      setProcessingStatus({ stage: "failed", progress: 0, message: "" });
+    }
+  };
+
+  const handleAskAI = async (text: string) => {
+    if (!activeSession) return;
+    setIsChatOpen(true); // Open slide-out Chat Buddy drawer
+    
+    const newUserMsg: ChatMessage = {
+      id: "usr_" + Date.now().toString(36),
+      role: "user",
+      content: text,
+      timestamp: new Date().toISOString()
+    };
+    
+    const stagedHistory = [...activeSession.chatHistory, newUserMsg];
+    
+    const updatedSessionWithUser = { ...activeSession, chatHistory: stagedHistory };
+    saveSessions(sessions.map(s => s.id === activeSession.id ? updatedSessionWithUser : s));
+    
+    try {
+      const response = await fetch("/api/chat", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          message: text,
+          history: activeSession.chatHistory.filter(m => m.id !== "welcome_msg"),
+          contextSubject: activeSession.title,
+          contextSummary: activeSession.summary + "\n\nTranscript: " + (activeSession.transcript || "")
+        })
+      });
+      
+      if (!response.ok) {
+        throw new Error("Chat service communication error");
+      }
+      
+      const resJson = await response.json();
+      
+      const newModelMsg: ChatMessage = {
+        id: "ai_" + Date.now().toString(36),
+        role: "model",
+        content: resJson.content,
+        timestamp: new Date().toISOString()
+      };
+      
+      const updatedSessionWithModel = { ...updatedSessionWithUser, chatHistory: [...stagedHistory, newModelMsg] };
+      saveSessions(sessions.map(s => s.id === activeSession.id ? updatedSessionWithModel : s));
+    } catch (err) {
+      console.error("Failed to query AI from MindMapCanvas:", err);
+    }
   };
 
   const copyToClipboard = () => {
@@ -934,31 +1364,46 @@ This workspace was custom-curated in **⚡ Turbo Fast-Track Mode** to bypass bro
           Σ
         </div>
         <nav className="flex flex-col gap-6 items-center">
+          {/* Button 1: Upload / Analysis Station */}
           <button
             onClick={() => setActiveSessionId(null)}
-            className={`p-3 rounded-xl transition duration-150 ${!activeSession ? "bg-slate-100 text-indigo-600" : "text-slate-400 hover:text-slate-600"}`}
+            className={`p-3 rounded-xl transition duration-150 cursor-pointer ${!activeSession ? "bg-slate-100 text-indigo-600" : "text-slate-400 hover:text-slate-600"}`}
             title="Analysis Station"
           >
             <Upload className="w-5.5 h-5.5" />
           </button>
-          {activeSession && (
-            <>
-              <button
-                onClick={() => setActiveTab("mindmap")}
-                className={`p-3 rounded-xl transition duration-150 ${activeTab === "mindmap" ? "bg-slate-100 text-indigo-600" : "text-slate-400 hover:text-slate-600"}`}
-                title="Mind Map"
-              >
-                <Workflow className="w-5.5 h-5.5" />
-              </button>
-              <button
-                onClick={() => setActiveTab("summary")}
-                className={`p-3 rounded-xl transition duration-150 ${activeTab === "summary" ? "bg-slate-100 text-indigo-600" : "text-slate-400 hover:text-slate-600"}`}
-                title="Syllabus Resume"
-              >
-                <FileText className="w-5.5 h-5.5" />
-              </button>
-            </>
-          )}
+
+          {/* Button 2: Choose Templates */}
+          <button
+            onClick={() => {
+              if (activeSidebarTab === "templates" && !isSidebarCollapsed) {
+                setIsSidebarCollapsed(true);
+              } else {
+                setActiveSidebarTab("templates");
+                setIsSidebarCollapsed(false);
+              }
+            }}
+            className={`p-3 rounded-xl transition duration-150 cursor-pointer ${activeSidebarTab === "templates" && !isSidebarCollapsed ? "bg-slate-100 text-indigo-600" : "text-slate-400 hover:text-slate-600"}`}
+            title="Formularios de Resumen"
+          >
+            <BookOpen className="w-5.5 h-5.5" />
+          </button>
+
+          {/* Button 3: Library Explorer */}
+          <button
+            onClick={() => {
+              if (activeSidebarTab === "history" && !isSidebarCollapsed) {
+                setIsSidebarCollapsed(true);
+              } else {
+                setActiveSidebarTab("history");
+                setIsSidebarCollapsed(false);
+              }
+            }}
+            className={`p-3 rounded-xl transition duration-150 cursor-pointer ${activeSidebarTab === "history" && !isSidebarCollapsed ? "bg-slate-100 text-indigo-600" : "text-slate-400 hover:text-slate-600"}`}
+            title="Historial de Reuniones"
+          >
+            <FolderHeart className="w-5.5 h-5.5" />
+          </button>
         </nav>
         <div className="mt-auto">
           <div className="w-3.5 h-3.5 rounded-full bg-indigo-600" title="API Connected" />
@@ -1183,353 +1628,531 @@ This workspace was custom-curated in **⚡ Turbo Fast-Track Mode** to bypass bro
             </div>
           </div>
         ) : activeSession ? (
-          /* SECTION A: Dashboard active session 3-column Layout structure */
-          <section className="flex-1 grid grid-cols-12 gap-0 overflow-hidden min-h-0">
+          /* SECTION A: Redesigned PLAUD-style Document-First spacious Layout */
+          <section className="flex-1 grid grid-cols-12 gap-0 overflow-hidden min-h-0 relative">
             
-            {/* Column 1: Summary & Action Progress Indicators (Span 3) */}
-            <div className="col-span-12 lg:col-span-3 border-r border-slate-200 p-6 flex flex-col gap-6 bg-white overflow-y-auto h-full">
-              <div>
-                <h2 className="text-[10px] font-bold uppercase text-slate-400 tracking-wider mb-3">Executive Summary</h2>
-                <div className="text-xs leading-relaxed text-slate-600 bg-slate-50 border border-slate-200/60 p-3 rounded-lg font-sans">
-                  {activeSession.summary ? 
-                    (activeSession.summary.replace(/[#*]/g, "").substring(0, 190).trim() + "...") :
-                    "We have categorized major logistics constraint models and key conceptual landmarks for your current project."
-                  }
-                </div>
-              </div>
-
-              <div className="border-t border-slate-100 pt-5">
-                <h2 className="text-[10px] font-bold uppercase text-slate-400 tracking-wider mb-2">Key Progress Metrics</h2>
-                <div className="grid grid-cols-2 gap-2 mt-2">
-                  <div className="bg-slate-50 border border-slate-100 p-3 rounded-lg text-center">
-                    <span className="block text-lg font-bold text-indigo-600">
-                      {activeSession.actionItems.filter(t => t.completed).length}/{activeSession.actionItems.length}
-                    </span>
-                    <span className="text-[9px] text-slate-400 font-semibold uppercase">Goals Done</span>
+            {/* Column 1: Clean, Consolidated Sidebar (Span 3) */}
+            {!isSidebarCollapsed && (
+              <div className="col-span-12 lg:col-span-3 border-r border-slate-200 p-5 flex flex-col gap-6 bg-white overflow-y-auto h-full animate-fade-in">
+              
+              {activeSidebarTab === "templates" ? (
+                /* Formatos de Resumen (Templates) Panel */
+                <div className="space-y-4 animate-fade-in">
+                  <div className="flex items-center gap-1.5 border-b border-slate-50 pb-3 mb-1">
+                    <BookOpen className="h-5 w-5 text-indigo-500 animate-pulse" />
+                    <div>
+                      <h2 className="font-sans text-sm font-bold text-slate-800">Formatos de Resumen</h2>
+                      <p className="font-sans text-[10px] text-slate-400">Selecciona el template de estructuración</p>
+                    </div>
                   </div>
-                  <div className="bg-slate-50 border border-slate-100 p-3 rounded-lg text-center">
-                    <span className="block text-lg font-bold text-slate-700">
-                      {activeSession.flashcards.filter(c => c.learned).length}/{activeSession.flashcards.length}
-                    </span>
-                    <span className="text-[9px] text-slate-400 font-semibold uppercase">Reviewed</span>
+                  
+                  <div className="flex flex-col gap-2 pr-1">
+                    {SUMMARY_TEMPLATES.map((tpl) => {
+                      const isSelected = selectedTemplateId === tpl.id;
+                      return (
+                        <button
+                          key={tpl.id}
+                          onClick={() => setSelectedTemplateId(tpl.id)}
+                          className={`text-left text-xs font-bold px-3 py-2.5 rounded-xl transition flex flex-col gap-1 border cursor-pointer ${
+                            isSelected 
+                              ? "bg-slate-900 border-slate-900 text-white shadow-2xs" 
+                              : "bg-slate-50 border-slate-200/50 text-slate-700 hover:bg-slate-100/50 hover:border-slate-250"
+                          }`}
+                          title={tpl.description}
+                        >
+                          <span className="font-extrabold truncate block w-full">{tpl.name}</span>
+                          <span className={`text-[9px] font-medium leading-none ${isSelected ? "text-indigo-200 text-slate-300" : "text-slate-400"}`}>
+                            {tpl.category}
+                          </span>
+                          <p className={`text-[10px] leading-relaxed font-normal ${isSelected ? "text-slate-200" : "text-slate-500"}`}>
+                            {tpl.description}
+                          </p>
+                        </button>
+                      );
+                    })}
                   </div>
                 </div>
-              </div>
-
-              {/* Topic Folders (Temas) widget */}
-              <div className="border-t border-slate-100 pt-5 space-y-4">
-                <div className="flex items-center justify-between">
-                  <div className="flex items-center gap-1.5">
-                    <FolderTree className="h-4 w-4 text-indigo-500" />
-                    <span className="text-[10px] font-bold uppercase text-slate-400 tracking-wider">Temas de Reunión</span>
+              ) : (
+                /* Standard Explorer Panel (History & Folders) */
+                <div className="space-y-6 animate-fade-in flex flex-col h-full">
+                  {/* Key Progress Metrics */}
+                  <div>
+                    <h2 className="text-[10px] font-bold uppercase text-slate-400 tracking-wider mb-2">Progreso General</h2>
+                    <div className="grid grid-cols-2 gap-2 mt-1.5">
+                      <div className="bg-slate-50 border border-slate-100 p-3 rounded-lg text-center shadow-3xs">
+                        <span className="block text-lg font-bold text-indigo-600">
+                          {activeSession.actionItems.filter(t => t.completed).length}/{activeSession.actionItems.length}
+                        </span>
+                        <span className="text-[9px] text-slate-400 font-bold uppercase">Objetivos</span>
+                      </div>
+                      <div className="bg-slate-50 border border-slate-100 p-3 rounded-lg text-center shadow-3xs">
+                        <span className="block text-lg font-bold text-slate-700">
+                          {activeSession.flashcards.filter(c => c.learned).length}/{activeSession.flashcards.length}
+                        </span>
+                        <span className="text-[9px] text-slate-400 font-bold uppercase">Repaso</span>
+                      </div>
+                    </div>
                   </div>
-                  <button 
-                    onClick={() => {
-                      const name = prompt("Ingrese el nombre del nuevo Tema:");
-                      if (name && name.trim()) handleCreateFolder(name);
-                    }}
-                    className="text-[10px] font-bold text-indigo-600 hover:text-indigo-800 transition flex items-center gap-0.5"
-                  >
-                    + Nuevo
-                  </button>
-                </div>
 
-                <div className="flex flex-col gap-1.5 max-h-[140px] overflow-y-auto pr-1">
-                  <button
-                    onClick={() => setActiveFolderId(null)}
-                    className={`text-left text-xs font-semibold px-2.5 py-1.5 rounded-lg transition flex items-center justify-between ${
-                      activeFolderId === null 
-                        ? "bg-indigo-50 text-indigo-700" 
-                        : "text-slate-600 hover:bg-slate-50"
-                    }`}
-                  >
-                    <span className="truncate">📂 Todos los Temas</span>
-                    <span className="text-[10px] text-slate-400">({sessions.length})</span>
-                  </button>
+                  {/* Topic Folders (Temas) widget */}
+                  <div className="border-t border-slate-100 pt-5 space-y-4">
+                    <div className="flex items-center justify-between">
+                      <div className="flex items-center gap-1.5">
+                        <FolderTree className="h-4 w-4 text-indigo-500" />
+                        <span className="text-[10px] font-bold uppercase text-slate-400 tracking-wider">Temas de Reunión</span>
+                      </div>
+                      <button 
+                        onClick={() => {
+                          const name = prompt("Ingrese el nombre del nuevo Tema:");
+                          if (name && name.trim()) handleCreateFolder(name);
+                        }}
+                        className="text-[10px] font-bold text-indigo-600 hover:text-indigo-800 transition flex items-center gap-0.5 cursor-pointer"
+                      >
+                        + Nuevo
+                      </button>
+                    </div>
 
-                  {folders.map(folder => {
-                    const folderSessions = sessions.filter(s => s.folderId === folder.id);
-                    const isSelected = activeFolderId === folder.id;
-                    return (
+                    <div className="flex flex-col gap-1.5 max-h-[140px] overflow-y-auto pr-1">
                       <button
-                        key={folder.id}
-                        onClick={() => setActiveFolderId(folder.id)}
-                        className={`text-left text-xs font-semibold px-2.5 py-1.5 rounded-lg transition flex items-center justify-between ${
-                          isSelected 
+                        onClick={() => setActiveFolderId(null)}
+                        className={`text-left text-xs font-semibold px-2.5 py-1.5 rounded-lg transition flex items-center justify-between cursor-pointer ${
+                          activeFolderId === null 
                             ? "bg-indigo-50 text-indigo-700" 
                             : "text-slate-600 hover:bg-slate-50"
                         }`}
                       >
-                        <span className="truncate">📂 {folder.name}</span>
-                        <span className="text-[10px] text-slate-400">({folderSessions.length})</span>
+                        <span className="truncate">📂 Todos los Temas</span>
+                        <span className="text-[10px] text-slate-400">({sessions.length})</span>
                       </button>
-                    );
-                  })}
-                </div>
 
-                {/* AI Folder Curation Widget */}
-                {activeFolderId && (() => {
-                  const currentFolder = folders.find(f => f.id === activeFolderId);
-                  if (!currentFolder) return null;
-                  const folderSessions = sessions.filter(s => s.folderId === currentFolder.id);
+                      {folders.map(folder => {
+                        const folderSessions = sessions.filter(s => s.folderId === folder.id);
+                        const isSelected = activeFolderId === folder.id;
+                        return (
+                          <button
+                            key={folder.id}
+                            onClick={() => setActiveFolderId(folder.id)}
+                            className={`text-left text-xs font-semibold px-2.5 py-1.5 rounded-lg transition flex items-center justify-between cursor-pointer ${
+                              isSelected 
+                                ? "bg-indigo-50 text-indigo-700" 
+                                : "text-slate-600 hover:bg-slate-50"
+                            }`}
+                          >
+                            <span className="truncate">📂 {folder.name}</span>
+                            <span className="text-[10px] text-slate-400">({folderSessions.length})</span>
+                          </button>
+                        );
+                      })}
+                    </div>
 
-                  return (
-                    <div className="border border-indigo-100 bg-indigo-50/40 p-4 rounded-xl space-y-2.5">
-                      <div className="flex items-center justify-between">
-                        <h4 className="font-bold text-slate-800 text-[10px] uppercase tracking-wider">Inteligencia de Tema</h4>
-                        <span className="text-[8px] text-indigo-600 bg-indigo-100/60 px-2 py-0.5 rounded-full font-bold">Activo</span>
-                      </div>
-                      <p className="text-[10px] text-slate-500 leading-relaxed font-semibold">
-                        Combina los resúmenes de las {folderSessions.length} reuniones de este tema para obtener un informe consolidado por la IA.
-                      </p>
+                    {/* AI Folder Curation Widget */}
+                    {activeFolderId && (() => {
+                      const currentFolder = folders.find(f => f.id === activeFolderId);
+                      if (!currentFolder) return null;
+                      const folderSessions = sessions.filter(s => s.folderId === currentFolder.id);
 
-                      {currentFolder.aiSynthesis ? (
-                        <button
-                          onClick={() => {
-                            setSelectedSynthesisFolderId(currentFolder.id);
-                          }}
-                          className="w-full bg-white border border-indigo-150 text-indigo-700 text-[10px] font-bold py-1.5 rounded-lg hover:bg-indigo-100/30 transition flex items-center justify-center gap-1 shadow-2xs cursor-pointer"
-                        >
-                          📖 Leer Síntesis de Tema con IA
-                        </button>
-                      ) : (
-                        <button
-                          disabled={folderSessions.length === 0 || isSynthesizingFolder}
-                          onClick={() => handleSynthesizeFolder(currentFolder.id)}
-                          className="w-full bg-indigo-600 text-white text-[10px] font-bold py-1.5 rounded-lg hover:bg-indigo-700 transition flex items-center justify-center gap-1 disabled:opacity-50 disabled:cursor-not-allowed cursor-pointer"
-                        >
-                          {isSynthesizingFolder ? (
-                            <>
-                              <Loader2 className="h-3 w-3 animate-spin text-white" />
-                              Sintetizando Tema...
-                            </>
+                      return (
+                        <div className="border border-indigo-100 bg-indigo-50/40 p-4 rounded-xl space-y-2.5 animate-fade-in">
+                          <div className="flex items-center justify-between">
+                            <h4 className="font-bold text-slate-800 text-[10px] uppercase tracking-wider">Inteligencia de Tema</h4>
+                            <span className="text-[8px] text-indigo-600 bg-indigo-100/60 px-2 py-0.5 rounded-full font-bold">Activo</span>
+                          </div>
+                          <p className="text-[10px] text-slate-500 leading-relaxed font-semibold">
+                            Combina los resúmenes de las {folderSessions.length} reuniones de este tema para obtener un informe consolidado por la IA.
+                          </p>
+
+                          {currentFolder.aiSynthesis ? (
+                            <button
+                              onClick={() => {
+                                setSelectedSynthesisFolderId(currentFolder.id);
+                              }}
+                              className="w-full bg-white border border-indigo-150 text-indigo-700 text-[10px] font-bold py-1.5 rounded-lg hover:bg-indigo-100/30 transition flex items-center justify-center gap-1 shadow-2xs cursor-pointer"
+                            >
+                              📖 Leer Síntesis de Tema con IA
+                            </button>
                           ) : (
-                            <>
-                              ✨ Sintetizar Tema con IA
-                            </>
+                            <button
+                              disabled={folderSessions.length === 0 || isSynthesizingFolder}
+                              onClick={() => handleSynthesizeFolder(currentFolder.id)}
+                              className="w-full bg-indigo-600 text-white text-[10px] font-bold py-1.5 rounded-lg hover:bg-indigo-700 transition flex items-center justify-center gap-1 disabled:opacity-50 disabled:cursor-not-allowed cursor-pointer"
+                            >
+                              {isSynthesizingFolder ? (
+                                <>
+                                  <Loader2 className="h-3 w-3 animate-spin text-white" />
+                                  Sintetizando Tema...
+                                </>
+                              ) : (
+                                <>
+                                  ✨ Sintetizar Tema con IA
+                                </>
+                              )}
+                            </button>
                           )}
-                        </button>
-                      )}
-                    </div>
-                  );
-                })()}
-              </div>
+                        </div>
+                      );
+                    })()}
+                  </div>
 
-              {/* Saved Study Library list widget */}
-              <div className="border-t border-slate-100 pt-5 mt-auto">
-                <SidebarHistory 
-                  sessions={activeFolderId ? sessions.filter(s => s.folderId === activeFolderId) : sessions} 
-                  activeSessionId={activeSessionId}
-                  onSelectSession={(id) => { setActiveSessionId(id); setActiveTab("summary"); }}
-                  onDeleteSession={handleDeleteSession}
-                />
-              </div>
+                  {/* Saved Study Library list widget */}
+                  <div className="border-t border-slate-100 pt-5 mt-auto">
+                    <SidebarHistory 
+                      sessions={activeFolderId ? sessions.filter(s => s.folderId === activeFolderId) : sessions} 
+                      activeSessionId={activeSessionId}
+                      onSelectSession={(id) => { setActiveSessionId(id); setActiveTab("summary"); }}
+                      onDeleteSession={handleDeleteSession}
+                    />
+                  </div>
+                </div>
+              )}
             </div>
+            )}
 
-            {/* Column 2: Visual Analysis / Map & Interactive Tabs (Span 5) */}
-            <div className="col-span-12 lg:col-span-5 bg-slate-50 relative p-6 flex flex-col gap-4 overflow-y-auto h-full">
-              <div className="flex items-center justify-between">
-                <h2 className="text-[10px] font-bold uppercase text-slate-500 tracking-wider">Centro de Inteligencia</h2>
+            {/* Column 2: Document-First Spacious Reader Area (Span 9 or 12 depending on collapse state) */}
+            <div className={`col-span-12 ${isSidebarCollapsed ? "lg:col-span-12" : "lg:col-span-9"} bg-slate-50/50 p-6 md:p-8 flex flex-col overflow-y-auto h-full min-h-0 transition-all duration-300`}>
+              <div className="max-w-4xl w-full mx-auto flex flex-col flex-1 gap-5 min-h-0">
                 
-                {/* Tiny inline helper tab switches */}
-                <div className="flex bg-white rounded-lg border border-slate-200 p-0.5 overflow-x-auto max-w-[250px] sm:max-w-none">
-                  {[
-                    { id: "summary", label: "Resumen" },
-                    { id: "transcript", label: "Transcripción" },
-                    { id: "mindmap", label: "Mapa Mental" },
-                    { id: "flashcards", label: "Flashcards" },
-                    { id: "infographics", label: "Infografías" },
-                    { id: "tasks", label: "Objetivos" }
-                  ].map((subTab) => {
-                    const isSelected = activeTab === subTab.id;
-                    return (
+                {/* Header Row: Title & Actions Bar */}
+                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 border-b border-slate-200 pb-4">
+                  <div className="flex items-center gap-3">
+                    {/* Collapsible toggle handle button */}
+                    <button
+                      onClick={() => setIsSidebarCollapsed(!isSidebarCollapsed)}
+                      className="p-2.5 bg-white border border-slate-200/80 rounded-xl text-slate-500 hover:text-slate-800 hover:bg-slate-50 transition cursor-pointer shadow-3xs hover:shadow-2xs active:scale-95 text-xs font-bold"
+                      title={isSidebarCollapsed ? "Mostrar menú lateral" : "Ocultar menú lateral"}
+                    >
+                      {isSidebarCollapsed ? "▶" : "◀"}
+                    </button>
+                    <div className="flex flex-col gap-1">
+                      <h1 className="text-lg md:text-xl font-black text-slate-900 tracking-tight leading-tight">
+                        {activeSession.title || activeSession.mediaName}
+                      </h1>
+                      <div className="flex items-center gap-2">
+                        <span className="bg-indigo-50 text-indigo-700 text-[10px] font-bold px-2 py-0.5 rounded border border-indigo-100 shadow-3xs">
+                          {activeSession.mediaType === "video" ? "📺 Video" : activeSession.mediaType === "pdf" ? "📕 Documento PDF" : "🎙️ Audio"}
+                        </span>
+                        
+                        {/* Topic Folder Selector */}
+                        <select
+                          value={activeSession.folderId || ""}
+                          onChange={(e) => {
+                            const val = e.target.value === "" ? null : e.target.value;
+                            handleMoveSessionToFolder(activeSession.id, val);
+                          }}
+                          className="bg-white border border-slate-200 text-slate-700 text-[9px] font-bold px-2 py-0.5 rounded-md cursor-pointer transition focus:outline-hidden hover:bg-slate-50"
+                          title="Asignar Tema"
+                        >
+                          <option value="">📂 Sin Tema (General)</option>
+                          {folders.map(f => (
+                            <option key={f.id} value={f.id}>
+                              📂 {f.name}
+                            </option>
+                          ))}
+                        </select>
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* Redesigned Tab Switcher Bar & AI Trigger (Reordered: Transcript first, removed Mind Map) */}
+                  <div className="flex items-center gap-3 self-start sm:self-auto flex-wrap">
+                    <div className="flex bg-white rounded-xl border border-slate-200/80 p-1 shadow-3xs overflow-x-auto">
+                      {[
+                        { id: "transcript", label: "Transcript" },
+                        { id: "summary", label: "Summary" },
+                        { id: "infographics", label: "Infographics" },
+                        { id: "tasks", label: "Goals" }
+                      ].map((subTab) => {
+                        const isSelected = activeTab === subTab.id;
+                        return (
+                          <button
+                            key={subTab.id}
+                            onClick={() => setActiveTab(subTab.id as any)}
+                            className={`px-3 py-1 text-[11px] font-bold rounded-lg transition duration-150 cursor-pointer ${
+                              isSelected 
+                                ? "bg-slate-900 text-white shadow-2xs" 
+                                : "text-slate-400 hover:text-slate-800"
+                            }`}
+                          >
+                            {subTab.label}
+                          </button>
+                        );
+                      })}
+                    </div>
+
+                    {/* Ask IA Floating/Header slide trigger */}
+                    <button
+                      onClick={() => setIsChatOpen(!isChatOpen)}
+                      className={`px-4 py-1.5 rounded-xl text-[11px] font-bold shadow-2xs border flex items-center gap-1.5 transition-all duration-150 cursor-pointer active:scale-95 ${
+                        isChatOpen 
+                          ? "bg-indigo-50 border-indigo-200 text-indigo-700" 
+                          : "bg-slate-900 border-slate-900 text-white hover:bg-slate-800"
+                      }`}
+                    >
+                      <Sparkles className="h-3.5 w-3.5" />
+                      Ask AI
+                    </button>
+                  </div>
+                </div>
+
+                {/* Premium Integrated Audio Playback Controller Bar */}
+                {activeSession.mediaType !== "pdf" && activeSession.mediaType !== "document" && (
+                  <div className="bg-white border border-slate-200/80 p-4 rounded-2xl shadow-3xs flex items-center justify-between gap-4 flex-wrap animate-fade-in">
+                    
+                    {/* Hidden Native Audio Element */}
+                    <audio
+                      ref={audioRef}
+                      onTimeUpdate={handleTimeUpdate}
+                      onLoadedMetadata={handleAudioLoadedMetadata}
+                      onEnded={() => setIsPlaying(false)}
+                      className="hidden"
+                    />
+
+                    {/* Play / Pause Toggle Button */}
+                    <button
+                      onClick={handlePlayPause}
+                      className="h-10 w-10 rounded-full bg-slate-900 text-white flex items-center justify-center hover:bg-indigo-600 transition shadow-xs cursor-pointer shrink-0 active:scale-95"
+                      title={isPlaying ? "Pausar" : "Reproducir"}
+                    >
+                      {isPlaying ? (
+                        <div className="flex items-center gap-0.5 justify-center">
+                          <span className="w-1.5 h-4 bg-white rounded-full block" />
+                          <span className="w-1.5 h-4 bg-white rounded-full block" />
+                        </div>
+                      ) : (
+                        <span className="ml-1 text-xs">▶</span>
+                      )}
+                    </button>
+
+                    {/* Track Seeker & Timeline */}
+                    <div className="flex-1 min-w-[200px] flex items-center gap-3">
+                      <span className="text-[10px] font-mono font-bold text-slate-400 shrink-0">
+                        {formatAudioTime(currentTime)}
+                      </span>
+                      <input
+                        type="range"
+                        min="0"
+                        max={audioDuration || 100}
+                        step="0.1"
+                        value={currentTime}
+                        onChange={handleSeekChange}
+                        className="flex-1 accent-indigo-600 h-1 bg-slate-100 rounded-lg cursor-pointer"
+                        title="Adelantar / Retroceder"
+                      />
+                      <span className="text-[10px] font-mono font-bold text-slate-500 shrink-0">
+                        {formatAudioTime(audioDuration)}
+                      </span>
+                    </div>
+
+                    {/* Controls Row: Speed & Wave Equalizer */}
+                    <div className="flex items-center gap-4 shrink-0">
+                      
+                      {/* Playback speed toggle */}
                       <button
-                        key={subTab.id}
-                        onClick={() => setActiveTab(subTab.id as any)}
-                        className={`px-2 py-0.5 text-[9px] font-bold rounded transition ${
-                          isSelected 
-                            ? "bg-indigo-600 text-white shadow-2xs" 
-                            : "text-slate-400 hover:text-slate-800"
-                        }`}
+                        onClick={handleSpeedToggle}
+                        className="px-2.5 py-1 rounded-lg border border-slate-200 hover:bg-slate-50 text-[10px] font-black text-slate-600 transition cursor-pointer"
+                        title="Cambiar velocidad de reproducción"
                       >
-                        {subTab.label}
+                        {playbackRate.toFixed(1)}x
                       </button>
-                    );
-                  })}
+
+                      {/* Equalizer Wave Animation (Only dances when isPlaying is true!) */}
+                      <div className="flex items-end gap-[2px] h-4 w-6 shrink-0" title={isPlaying ? "Reproduciendo audio" : "Reproductor pausado"}>
+                        {[
+                          { delay: "delay-[0.1s]", activeH: "h-3" },
+                          { delay: "delay-[0.3s]", activeH: "h-4" },
+                          { delay: "delay-[0.2s]", activeH: "h-2" },
+                          { delay: "delay-[0.4s]", activeH: "h-3.5" },
+                        ].map((bar, barIdx) => (
+                          <span
+                            key={barIdx}
+                            className={`w-[3px] rounded-full bg-indigo-600 transition-all duration-350 ${
+                              isPlaying ? `${bar.activeH} animate-pulse ${bar.delay}` : "h-[3px]"
+                            }`}
+                          />
+                        ))}
+                      </div>
+                    </div>
+                  </div>
+                )}
+
+                {/* Main White Document Canvas (Spacious Page reader) */}
+                <div className="flex-1 bg-white border border-slate-200/80 rounded-2xl p-6 md:p-10 shadow-3xs flex flex-col overflow-y-auto">
+                  
+                  {/* Dynamic Tab Rendering inside spacious block */}
+                  {activeTab === "infographics" && (
+                    <div className="flex-1 min-h-0 overflow-y-auto">
+                      <InfographicsDashboard session={activeSession} />
+                    </div>
+                  )}
+
+                  {activeTab === "tasks" && (
+                    <div className="flex-1 min-h-0 overflow-y-auto">
+                      <ActionItemsList 
+                        items={activeSession.actionItems}
+                        onToggleItem={handleToggleTask}
+                        onDeleteItem={handleDeleteTask}
+                      />
+                    </div>
+                  )}
+
+                  {activeTab === "summary" && (
+                    <div className="flex-1 flex flex-col min-h-0 animate-fade-in">
+                      
+                      {/* Premium PLAUD-style Metadata block at top of summary */}
+                      <div className="border-b border-slate-100 pb-5 mb-8 text-xs text-slate-500 grid grid-cols-1 sm:grid-cols-3 gap-4 font-sans bg-slate-50/50 p-4 rounded-xl leading-normal">
+                        <div>
+                          <span className="font-bold text-slate-800">📅 Date & Time:</span>{" "}
+                          {new Date(activeSession.createdAt).toLocaleString("en-US", { dateStyle: "long", timeStyle: "short" })}
+                        </div>
+                        <div>
+                          <span className="font-bold text-slate-800">📍 Location:</span>{" "}
+                          Acme Virtual Call / Panama
+                        </div>
+                        <div>
+                          <span className="font-bold text-slate-800">👥 Speakers:</span>{" "}
+                          {activeSession.transcript ? activeSession.transcript.split("\n").reduce((acc, curr) => {
+                              const match = curr.trim().match(/^\[\d{2}:\d{2}(?::\d{2})?\]\s*(.*?):\s*/);
+                              if (match) {
+                                const name = formatSpeakerName(match[1].trim());
+                                if (!acc.includes(name)) acc.push(name);
+                              }
+                              return acc;
+                            }, [] as string[]).length || 2 : 2}{" "}
+                          detected speakers
+                        </div>
+                      </div>
+
+                      {/* Header with copy text shortcut */}
+                      <div className="flex items-center justify-between border-b pb-2 mb-4 border-slate-100">
+                        <span className="text-[10px] text-slate-400 font-extrabold uppercase tracking-wider">Executive summary notes</span>
+                        <div className="flex items-center gap-3">
+                          {/* Regenerar con formato */}
+                          <button
+                            onClick={handleReprocessSummary}
+                            disabled={processingStatus.stage !== "idle"}
+                            className="text-[10px] font-black text-indigo-600 hover:text-indigo-800 hover:underline flex items-center gap-1 cursor-pointer disabled:opacity-50"
+                            title="Regenerar este resumen usando la plantilla seleccionada a la izquierda"
+                          >
+                            🔄 Regenerate Summary
+                          </button>
+                          <span className="text-slate-200">|</span>
+                          <button 
+                            onClick={copyToClipboard}
+                            className="text-[10px] font-bold text-indigo-600 hover:text-indigo-800 hover:underline cursor-pointer"
+                          >
+                            {isCopingSummary ? "¡Copiado!" : "Copy text"}
+                          </button>
+                        </div>
+                      </div>
+
+                      {/* Spacious text reader body */}
+                      <div className="flex-1 pr-1 pb-4">
+                        <FormatMarkdown text={activeSession.summary} />
+                      </div>
+                    </div>
+                  )}
+
+                  {activeTab === "transcript" && (
+                    <div className="flex-1 flex flex-col min-h-0 animate-fade-in">
+                      <div className="flex items-center justify-between border-b pb-2 mb-4 border-slate-100">
+                        <span className="text-[10px] text-slate-400 font-extrabold uppercase tracking-wider">Diarized speech logs</span>
+                      </div>
+                      <div className="flex-1 pr-1">
+                        <RenderTranscriptTimeline 
+                          text={activeSession.transcript || ""} 
+                          speakerMap={activeSession.speakerMap}
+                          onRenameSpeaker={handleRenameSpeaker}
+                        />
+                      </div>
+                    </div>
+                  )}
                 </div>
               </div>
+            </div>
 
-              {/* Prominent dual-action buttons to switch summary vs transcript */}
-              <div className="grid grid-cols-2 gap-3" id="main-view-shortcut-buttons">
-                <button
-                  type="button"
-                  onClick={() => setActiveTab("summary")}
-                  className={`p-3 rounded-xl border text-left transition duration-150 flex flex-col gap-1 ${
-                    activeTab === "summary"
-                      ? "border-indigo-600 bg-white ring-2 ring-indigo-600/5 shadow-2xs"
-                      : "border-slate-200 bg-white/65 hover:bg-white text-slate-600"
-                  }`}
-                >
-                  <div className="flex items-center gap-1.5">
-                    <span className={`p-1 rounded-md ${activeTab === "summary" ? "bg-indigo-100 text-indigo-700" : "bg-slate-100 text-slate-550"}`}>
-                      <FileText className="h-3.5 w-3.5" />
-                    </span>
-                    <span className="font-sans font-extrabold text-[11px] text-slate-800">Ver Resumen Ejecutivo</span>
-                  </div>
-                  <span className="text-[9px] text-slate-400 leading-tight">
-                    Resumen ejecutivo en markdown, mapa de ideas e infografías corporativas.
-                  </span>
-                </button>
-
-                <button
-                  type="button"
-                  onClick={() => setActiveTab("transcript")}
-                  className={`p-3 rounded-xl border text-left transition duration-150 flex flex-col gap-1 ${
-                    activeTab === "transcript"
-                      ? "border-indigo-600 bg-white ring-2 ring-indigo-600/5 shadow-2xs"
-                      : "border-slate-200 bg-white/65 hover:bg-white text-slate-600"
-                  }`}
-                >
-                  <div className="flex items-center gap-1.5">
-                    <span className={`p-1 rounded-md ${activeTab === "transcript" ? "bg-indigo-100 text-indigo-700" : "bg-slate-100 text-slate-550"}`}>
-                      <FileAudio className="h-3.5 w-3.5" />
-                    </span>
-                    <span className="font-sans font-extrabold text-[11px] text-slate-800">Ver Transcripción por Temas</span>
-                  </div>
-                  <span className="text-[9px] text-slate-400 leading-tight">
-                    Transcripción fiel y diarizada con marcas de tiempo (minutos y segundos).
-                  </span>
-                </button>
-              </div>
-
-              {/* Dynamic core view workspace */}
-              <div className="flex-1 min-h-0 bg-white rounded-xl border border-slate-200 p-4 shadow-sm overflow-hidden flex flex-col">
-                {activeTab === "mindmap" && (
-                  <div className="flex-1 min-h-0">
-                    <MindMapCanvas rootNode={activeSession.mindMap} />
-                  </div>
-                )}
+            {/* AI Assistant Sliding Slide-Over Drawer */}
+            <div 
+              className={`fixed right-0 top-16 bottom-0 w-80 sm:w-[390px] bg-white border-l border-slate-200/80 shadow-2xl z-30 transition-transform duration-300 ease-in-out flex flex-col ${
+                isChatOpen ? "translate-x-0" : "translate-x-full"
+              }`}
+            >
+              <div className="flex-1 min-h-0 relative flex flex-col">
+                <ChatBuddy 
+                  session={activeSession} 
+                  onUpdateChatHistory={handleUpdateChatHistory}
+                />
                 
-                {activeTab === "flashcards" && (
-                  <div className="flex-1 min-h-0 overflow-y-auto">
-                    <FlashcardsDeck 
-                      cards={activeSession.flashcards}
-                      onToggleLearned={handleToggleFlashcardLearned}
-                    />
-                  </div>
-                )}
-
-                {activeTab === "infographics" && (
-                  <div className="flex-1 min-h-0 overflow-y-auto">
-                    <InfographicsDashboard session={activeSession} />
-                  </div>
-                )}
-
-                {activeTab === "tasks" && (
-                  <div className="flex-1 min-h-0 overflow-y-auto">
-                    <ActionItemsList 
-                      items={activeSession.actionItems}
-                      onToggleItem={handleToggleTask}
-                      onAddItem={handleAddTask}
-                      onDeleteItem={handleDeleteTask}
-                    />
-                  </div>
-                )}
-
-                {activeTab === "summary" && (
-                  <div className="flex-1 flex flex-col min-h-0">
-                    <div className="flex items-center justify-between border-b pb-2.5 mb-3 border-slate-100">
-                      <span className="text-[10px] text-slate-400 font-bold uppercase">Resumen de la Reunión</span>
-                      <button 
-                        onClick={copyToClipboard}
-                        className="text-[10px] font-bold text-indigo-600 hover:underline"
-                      >
-                        {isCopingSummary ? "¡Copiado!" : "Copiar texto"}
-                      </button>
-                    </div>
-                    <div className="flex-1 overflow-y-auto pr-1 space-y-6 pb-4">
-                      <FormatMarkdown text={activeSession.summary} />
-                    </div>
-                  </div>
-                )}
-
-                {activeTab === "transcript" && (
-                  <div className="flex-1 flex flex-col min-h-0">
-                    <div className="flex-1 overflow-y-auto pr-1 bg-slate-50/50 p-3 rounded">
-                      <RenderTranscriptTimeline text={activeSession.transcript || ""} />
-                    </div>
-                  </div>
-                )}
-              </div>
-
-              {/* Tips panel block */}
-              <div className="text-[10px] text-slate-400 flex items-center justify-between mt-auto px-1 border-t border-slate-200/60 pt-3">
-                <span>💡 Focus on checklist milestones to verify comprehension</span>
-                <button 
-                  onClick={() => setActiveTab(activeTab === "transcript" ? "mindmap" : "transcript")}
-                  className="text-indigo-600 hover:underline font-bold uppercase tracking-wider"
+                {/* Floating internal close handle button */}
+                <button
+                  onClick={() => setIsChatOpen(false)}
+                  className="absolute top-4 right-12 text-slate-400 hover:text-slate-600 transition p-1.5 rounded-lg hover:bg-slate-50 cursor-pointer"
+                  title="Close AI helper"
                 >
-                  {activeTab === "transcript" ? "View Mind Map" : "View Transcript"}
+                  ✕
                 </button>
               </div>
-
             </div>
 
-            {/* Column 3: Copilot Tutoring AI Assistant chat (Span 4) */}
-            <div className="col-span-12 lg:col-span-4 border-l border-slate-205 border-slate-200 flex flex-col bg-slate-50 h-full overflow-hidden">
-              <ChatBuddy 
-                session={activeSession} 
-                onUpdateChatHistory={handleUpdateChatHistory}
-              />
-            </div>
+            {/* General Floating Ask IA Action Button for convenience */}
+            <button
+              onClick={() => setIsChatOpen(!isChatOpen)}
+              className="fixed right-6 bottom-6 z-20 h-12 w-12 rounded-full bg-slate-900 text-white shadow-xl flex items-center justify-center hover:bg-indigo-600 hover:scale-105 active:scale-95 transition-all duration-150 cursor-pointer"
+              title="Consultar con IA"
+            >
+              <Sparkles className="h-5 w-5 animate-pulse" />
+            </button>
 
           </section>
         ) : (
           /* SECTION B: NO active study session - Welcome & uploader suite */
-          <section className="flex-1 grid grid-cols-12 gap-0 overflow-hidden h-full">
+          <section className="flex-1 bg-slate-50/50 p-6 md:p-12 overflow-y-auto h-full flex items-center justify-center">
             
-            {/* Ingest side-panel inputs (Span 5) */}
-            <div className="col-span-12 lg:col-span-5 border-r border-slate-200 p-6 flex flex-col gap-6 bg-white overflow-y-auto">
-              <div>
-                <h2 className="text-[10px] font-bold uppercase text-slate-400 tracking-wider mb-1.5">Plataforma de Ingesta Corporativa</h2>
-                <p className="text-xs text-slate-500 leading-relaxed font-sans mb-3.5">
-                  Procesa grabaciones de audio/video y documentos de manera inmediata. Obtén transcripciones con oradores, resúmenes ejecutivos e infografías corporativas.
+            {/* Center aligned Apple-style Minimal Ingestion Card */}
+            <div className="max-w-xl w-full bg-white border border-slate-200/80 rounded-3xl p-8 md:p-10 shadow-sm flex flex-col gap-6 animate-fade-in">
+              <div className="text-center space-y-1.5">
+                <span className="text-[10px] font-bold uppercase text-indigo-600 tracking-widest bg-indigo-50 border border-indigo-100 px-3 py-1 rounded-full">
+                  PLAUD Corporate Intelligence
+                </span>
+                <h1 className="text-xl md:text-2xl font-black text-slate-900 tracking-tight mt-3">
+                  Plataforma de Ingesta
+                </h1>
+                <p className="text-xs text-slate-500 leading-relaxed font-sans max-w-sm mx-auto">
+                  Sube tus archivos multimedia o de texto para que la IA realice una transcripción diarizada y un resumen ejecutivo estructurado.
                 </p>
+              </div>
 
-                {/* Sub-tab selection hooks */}
-                <div className="flex bg-slate-100 p-1 rounded-lg border border-slate-200 gap-1">
-                  <button
-                    onClick={() => { setActiveIngestTab("upload"); setUploadError(null); }}
-                    className={`flex-1 py-1.5 text-[11px] font-bold rounded-md transition duration-150 ${activeIngestTab === "upload" ? "bg-white text-indigo-600 shadow-2xs" : "text-slate-500 hover:text-slate-700"}`}
-                  >
-                    Upload File
-                  </button>
-                  <button
-                    onClick={() => { setActiveIngestTab("paste"); setUploadError(null); }}
-                    className={`flex-1 py-1.5 text-[11px] font-bold rounded-md transition duration-150 ${activeIngestTab === "paste" ? "bg-white text-indigo-600 shadow-2xs" : "text-slate-500 hover:text-slate-700"}`}
-                  >
-                    Paste Transcript
-                  </button>
-                  <button
-                    onClick={() => { setActiveIngestTab("simulate"); setUploadError(null); }}
-                    className={`flex-1 py-1.5 text-[11px] font-bold rounded-md transition duration-150 ${activeIngestTab === "simulate" ? "bg-white text-indigo-600 shadow-2xs" : "text-slate-500 hover:text-slate-700"}`}
-                  >
-                    ⚡ Fast Simulation
-                  </button>
-                </div>
+              {/* Sub-tab selection hooks */}
+              <div className="flex bg-slate-100 p-1 rounded-xl border border-slate-200/50 gap-1 shadow-3xs">
+                <button
+                  onClick={() => { setActiveIngestTab("upload"); setUploadError(null); }}
+                  className={`flex-1 py-2 text-[11px] font-black rounded-lg transition duration-150 cursor-pointer ${activeIngestTab === "upload" ? "bg-white text-indigo-600 shadow-2xs" : "text-slate-500 hover:text-slate-700"}`}
+                >
+                  Upload File
+                </button>
+                <button
+                  onClick={() => { setActiveIngestTab("paste"); setUploadError(null); }}
+                  className={`flex-1 py-2 text-[11px] font-black rounded-lg transition duration-150 cursor-pointer ${activeIngestTab === "paste" ? "bg-white text-indigo-600 shadow-2xs" : "text-slate-500 hover:text-slate-700"}`}
+                >
+                  Paste Text
+                </button>
+                <button
+                  onClick={() => { setActiveIngestTab("simulate"); setUploadError(null); }}
+                  className={`flex-1 py-2 text-[11px] font-black rounded-lg transition duration-150 cursor-pointer ${activeIngestTab === "simulate" ? "bg-white text-indigo-600 shadow-2xs" : "text-slate-500 hover:text-slate-700"}`}
+                >
+                  ⚡ Fast Simulation
+                </button>
               </div>
 
               {activeIngestTab === "upload" && (
-                <>
+                <div className="space-y-4">
                   {/* Drag and Drop box */}
                   <div 
                     onDragOver={(e) => { e.preventDefault(); setDragOver(true); }}
                     onDragLeave={() => setDragOver(false)}
                     onDrop={handleFileDrop}
-                    className={`border-2 border-dashed rounded-xl p-6 flex flex-col items-center justify-center text-center transition min-h-[160px] cursor-pointer ${
+                    className={`border-2 border-dashed rounded-2xl p-8 flex flex-col items-center justify-center text-center transition min-h-[160px] cursor-pointer ${
                       dragOver 
                         ? "border-indigo-600 bg-indigo-50/20 text-indigo-700" 
-                        : "border-slate-200 bg-slate-50/50 text-slate-550 text-slate-500 hover:bg-slate-50/80 hover:border-slate-350"
+                        : "border-slate-200 bg-slate-50/50 text-slate-500 hover:bg-slate-50/85 hover:border-slate-350"
                     }`}
                     onClick={() => document.getElementById("hidden-file-btn")?.click()}
                   >
@@ -1540,11 +2163,11 @@ This workspace was custom-curated in **⚡ Turbo Fast-Track Mode** to bypass bro
                       accept="audio/*,video/*,application/pdf,text/*,.pdf,.txt,.md,.csv"
                       onChange={(e) => e.target.files?.[0] && handleFileInput(e.target.files[0])}
                     />
-                    <div className="h-10 w-10 rounded-lg bg-slate-100 border border-slate-200/60 flex items-center justify-center text-indigo-600 mb-3 shadow-2xs">
+                    <div className="h-10 w-10 rounded-xl bg-white border border-slate-200 flex items-center justify-center text-indigo-600 mb-3 shadow-3xs">
                       <Upload className="h-5 w-5" />
                     </div>
-                    <span className="text-xs font-semibold text-slate-700 block">Drag & drop workspace files here</span>
-                    <span className="text-[10px] text-slate-400 block mt-1">Supports Media (MP3, MP4) & Documents (PDF, TXT, MD) up to 150MB</span>
+                    <span className="text-xs font-semibold text-slate-700 block">Drag & drop files here</span>
+                    <span className="text-[10px] text-slate-400 block mt-1">Supports Media (MP3, MP4) & Documents (PDF, TXT) up to 150MB</span>
                   </div>
 
                   {uploadError && uploadError.includes("too large") ? (
@@ -1556,7 +2179,7 @@ This workspace was custom-curated in **⚡ Turbo Fast-Track Mode** to bypass bro
                       {simTopic && (
                         <button
                           onClick={() => handleSimulateFastTrack(simTopic, simMediaType)}
-                          className="mt-1 self-start px-3 py-1.5 text-[10px] font-bold text-white bg-indigo-600 hover:bg-indigo-700 rounded-lg shadow-sm transition active:scale-95"
+                          className="mt-1 self-start px-3 py-1.5 text-[10px] font-bold text-white bg-indigo-600 hover:bg-indigo-700 rounded-lg shadow-sm transition active:scale-95 cursor-pointer"
                         >
                           ⚡ Run Instant Simulation for "{simTopic}" Now
                         </button>
@@ -1573,29 +2196,29 @@ This workspace was custom-curated in **⚡ Turbo Fast-Track Mode** to bypass bro
                   <div className="pt-1">
                     <AudioRecorder onAudioReady={handleMicAudioReady} isProcessing={processingStatus.stage !== "idle"} />
                   </div>
-                </>
+                </div>
               )}
 
               {activeIngestTab === "paste" && (
                 <div className="space-y-4 font-sans text-xs">
                   <div className="flex flex-col gap-1.5">
-                    <label className="font-bold text-slate-600 uppercase tracking-wide text-[9px]">Lecture Topic Title</label>
+                    <label className="font-bold text-slate-600 uppercase tracking-wide text-[9px]">Meeting Title</label>
                     <input
                       type="text"
                       value={pastedTitle}
                       onChange={(e) => setPastedTitle(e.target.value)}
-                      placeholder="e.g. Astrophysics Lecture 4: Hydrogen Fusion"
-                      className="w-full border border-slate-200 rounded-lg p-2.5 bg-slate-50 focus:bg-white focus:ring-1 focus:ring-indigo-500 font-semibold text-slate-800"
+                      placeholder="e.g. Proyecto Celia Bot: Reunión CRM"
+                      className="w-full border border-slate-200 rounded-xl p-2.5 bg-slate-50 focus:bg-white focus:ring-1 focus:ring-indigo-500 font-bold text-slate-800"
                     />
                   </div>
                   <div className="flex flex-col gap-1.5">
-                    <label className="font-bold text-slate-600 uppercase tracking-wide text-[9px]">Transcript Paragraphs / Lecture Notes</label>
+                    <label className="font-bold text-slate-600 uppercase tracking-wide text-[9px]">Transcript Notes</label>
                     <textarea
                       value={pastedText}
                       onChange={(e) => setPastedText(e.target.value)}
-                      placeholder="Paste your 1-4 hour transcription paragraphs or written lecture notes here... Bypasses any network size bottlenecks!"
-                      rows={6}
-                      className="w-full border border-slate-200 rounded-lg p-2.5 bg-slate-50 focus:bg-white focus:ring-1 focus:ring-indigo-500 font-mono text-[11px] leading-relaxed"
+                      placeholder="Pega las notas de tu reunión o transcripción completa aquí..."
+                      rows={5}
+                      className="w-full border border-slate-200 rounded-xl p-2.5 bg-slate-50 focus:bg-white focus:ring-1 focus:ring-indigo-500 font-sans text-xs leading-relaxed"
                     />
                   </div>
 
@@ -1609,7 +2232,7 @@ This workspace was custom-curated in **⚡ Turbo Fast-Track Mode** to bypass bro
                   <button
                     onClick={() => {
                       if (!pastedTitle.trim() || !pastedText.trim()) {
-                        setUploadError("Please provide both a title and text lecture content before processing.");
+                        setUploadError("Please provide both a title and content before processing.");
                         return;
                       }
                       setUploadError(null);
@@ -1623,19 +2246,19 @@ This workspace was custom-curated in **⚡ Turbo Fast-Track Mode** to bypass bro
                       });
                     }}
                     disabled={!pastedTitle.trim() || !pastedText.trim()}
-                    className="w-full py-2.5 bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50 disabled:hover:bg-indigo-600 text-white font-bold rounded-lg text-xs transition duration-150 shadow-xs flex items-center justify-center gap-1.5"
+                    className="w-full py-2.5 bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50 disabled:hover:bg-indigo-600 text-white font-bold rounded-xl text-xs transition duration-150 shadow-xs flex items-center justify-center gap-1.5 cursor-pointer"
                   >
-                    <Sparkles className="w-4 h-4 text-indigo-200" /> Start Real Gemini Analysis
+                    <Sparkles className="w-4 h-4 text-indigo-200 animate-pulse" /> Start Gemini Analysis
                   </button>
                 </div>
               )}
 
               {activeIngestTab === "simulate" && (
                 <div className="space-y-4 font-sans text-xs">
-                  <div className="bg-indigo-50 text-indigo-900 border border-indigo-100 p-3.5 rounded-xl leading-normal">
+                  <div className="bg-indigo-50 text-indigo-900 border border-indigo-100 p-3.5 rounded-2xl leading-normal">
                     <p className="font-bold flex items-center gap-1.5 text-indigo-950">⚡ Local Simulator Active</p>
                     <p className="text-[11px] text-slate-600 mt-1 leading-relaxed">
-                      Designed to bypass network timeouts and upload freezes entirely during developer testing. Run any topic name through our curation generator instantly!
+                      Estructura tus notas al instante saltándote la subida de archivos pesados. ¡Elige un tema y pruébalo en segundos!
                     </p>
                   </div>
 
@@ -1645,8 +2268,8 @@ This workspace was custom-curated in **⚡ Turbo Fast-Track Mode** to bypass bro
                       type="text"
                       value={simTopic}
                       onChange={(e) => setSimTopic(e.target.value)}
-                      placeholder="e.g. Organic Chemistry Carbon Chains, Classical Piano"
-                      className="w-full border border-slate-200 rounded-lg p-2.5 bg-slate-50 focus:bg-white focus:ring-1 focus:ring-indigo-500 font-semibold text-slate-800"
+                      placeholder="e.g. Implementación de Celia Bot y CRM"
+                      className="w-full border border-slate-200 rounded-xl p-2.5 bg-slate-50 focus:bg-white focus:ring-1 focus:ring-indigo-500 font-bold text-slate-800"
                     />
                   </div>
 
@@ -1655,13 +2278,13 @@ This workspace was custom-curated in **⚡ Turbo Fast-Track Mode** to bypass bro
                     <div className="grid grid-cols-2 gap-2">
                       <button
                         onClick={() => setSimMediaType("audio")}
-                        className={`py-2 px-3 border rounded-lg font-bold text-center transition duration-150 ${simMediaType === "audio" ? "border-indigo-600 bg-indigo-50 text-indigo-700" : "border-slate-250 border-slate-200 bg-slate-50 hover:bg-slate-100 text-slate-600"}`}
+                        className={`py-2 px-3 border rounded-xl font-bold text-center transition duration-150 cursor-pointer ${simMediaType === "audio" ? "border-indigo-600 bg-indigo-50 text-indigo-700" : "border-slate-200 bg-slate-50 hover:bg-slate-100 text-slate-600"}`}
                       >
                         🎙️ Simulated Audio
                       </button>
                       <button
                         onClick={() => setSimMediaType("video")}
-                        className={`py-2 px-3 border rounded-lg font-bold text-center transition duration-150 ${simMediaType === "video" ? "border-indigo-600 bg-indigo-50 text-indigo-700" : "border-slate-250 border-slate-200 bg-slate-50 hover:bg-slate-100 text-slate-600"}`}
+                        className={`py-2 px-3 border rounded-xl font-bold text-center transition duration-150 cursor-pointer ${simMediaType === "video" ? "border-indigo-600 bg-indigo-50 text-indigo-700" : "border-slate-200 bg-slate-50 hover:bg-slate-100 text-slate-600"}`}
                       >
                         📺 Simulated Video
                       </button>
@@ -1685,79 +2308,13 @@ This workspace was custom-curated in **⚡ Turbo Fast-Track Mode** to bypass bro
                       handleSimulateFastTrack(simTopic, simMediaType);
                     }}
                     disabled={!simTopic.trim()}
-                    className="w-full py-2.5 bg-slate-900 hover:bg-slate-800 disabled:opacity-50 text-white font-bold rounded-lg text-xs transition duration-150 shadow-xs active:scale-95"
+                    className="w-full py-2.5 bg-slate-900 hover:bg-slate-800 disabled:opacity-50 text-white font-bold rounded-xl text-xs transition duration-150 shadow-xs active:scale-95 cursor-pointer"
                   >
                     🚀 Build Simulated Workspace Instantly
                   </button>
                 </div>
               )}
 
-              {/* Quick database links catalog if any saved */}
-              {sessions.length > 0 && (
-                <div className="border-t border-slate-105 border-slate-200/60 pt-4 mt-auto">
-                  <h3 className="text-[10px] font-bold uppercase text-slate-400 tracking-wider mb-2">Archivo de Reuniones</h3>
-                  <div className="max-h-[110px] overflow-y-auto space-y-1.5 pr-1">
-                    {sessions.map((sess) => (
-                      <div 
-                        key={sess.id}
-                        onClick={() => { setActiveSessionId(sess.id); setActiveTab("summary"); }}
-                        className="flex items-center justify-between p-2 rounded-lg bg-slate-50 hover:bg-slate-100 border border-slate-100 hover:border-slate-200 transition text-[11px] text-slate-700 cursor-pointer animate-fade-in"
-                      >
-                        <span className="font-semibold truncate max-w-[80%]">{sess.title || sess.mediaName}</span>
-                        <span className="text-[10px] text-indigo-650 font-bold">Ver &gt;</span>
-                      </div>
-                    ))}
-                  </div>
-                </div>
-              )}
-            </div>
-
-            {/* Introductory Graphics & Preset Course Syllabus Tracks (Span 7) */}
-            <div className="col-span-12 lg:col-span-7 bg-slate-50 p-8 flex flex-col justify-between overflow-y-auto h-full">
-              <div className="max-w-xl space-y-6">
-                <div>
-                  <span className="text-[10px] font-bold uppercase text-indigo-600 tracking-widest bg-indigo-50 border border-indigo-100 px-3 py-1 rounded-full">
-                    Workspace Intelligence
-                  </span>
-                  <h2 className="text-2xl md:text-3xl font-display font-extrabold tracking-tight text-slate-800 mt-4 leading-tight">
-                    PLAUD Corporate Intelligence
-                  </h2>
-                  <p className="text-xs md:text-sm text-slate-600 mt-2.5 leading-relaxed font-sans">
-                    Un espacio de trabajo inteligente de alto rendimiento para el análisis de reuniones y minado de ideas. Sube grabaciones de audio/video o inicia un dictado en vivo para obtener de manera completamente automatizada la transcripción diarizada por oradores, resumen ejecutivo, checklist de accionables, mapa mental e infografías estadísticas con Gemini.
-                  </p>
-                </div>
-              </div>
-
-              {/* Discrete Demo Session Links relegated to absolute bottom */}
-              <div className="mt-auto pt-6 border-t border-slate-200/40 text-left">
-                <span className="text-[9px] font-bold text-slate-400 uppercase tracking-wider block mb-1.5">Ejemplos de Referencia (Demostraciones)</span>
-                <div className="flex flex-wrap gap-3">
-                  <button
-                    onClick={() => handleSelectSample("ai-ethics")}
-                    className="text-[10px] font-semibold text-slate-400 hover:text-indigo-600 hover:underline transition duration-150 cursor-pointer"
-                  >
-                    • Ética y IA
-                  </button>
-                  <button
-                    onClick={() => handleSelectSample("nextjs")}
-                    className="text-[10px] font-semibold text-slate-400 hover:text-indigo-600 hover:underline transition duration-150 cursor-pointer"
-                  >
-                    • Alineación Técnica
-                  </button>
-                  <button
-                    onClick={() => handleSelectSample("habits")}
-                    className="text-[10px] font-semibold text-slate-400 hover:text-indigo-600 hover:underline transition duration-150 cursor-pointer"
-                  >
-                    • Plan OKRs
-                  </button>
-                </div>
-              </div>
-
-              {/* Bottom footer bar decoration */}
-              <div className="border-t border-slate-200 pt-5 mt-6 flex items-center justify-between text-[11px] text-slate-400 font-medium">
-                <span>© 2026 PLAUD Corporate Summarizer</span>
-                <span>Active Server Model V1.4</span>
-              </div>
             </div>
 
           </section>
@@ -1860,6 +2417,80 @@ This workspace was custom-curated in **⚡ Turbo Fast-Track Mode** to bypass bro
                   </span>
                 </div>
 
+                {/* Edit Frequent Speakers List */}
+                <div className="flex flex-col gap-1.5">
+                  <label className="font-bold text-slate-600 uppercase tracking-wide text-[9px] flex items-center gap-1">
+                    <Sparkles className="h-3.5 w-3.5 text-indigo-500" /> Hablantes Frecuentes (Diarización Inteligente)
+                  </label>
+                  <input
+                    type="text"
+                    value={frequentSpeakers}
+                    onChange={(e) => setFrequentSpeakers(e.target.value)}
+                    placeholder="e.g. Julio, Sophia, Roberto"
+                    className="w-full border border-slate-200 rounded-lg p-2.5 bg-slate-50 focus:bg-white focus:ring-1 focus:ring-indigo-500 font-bold text-slate-800 text-xs"
+                  />
+                  <span className="text-[9px] text-slate-400 leading-normal font-semibold">
+                    Ingresa los nombres de los participantes recurrentes separados por comas. La IA intentará identificarlos automáticamente en el audio.
+                  </span>
+                </div>
+
+                {/* Voice Print Calibration & Enrollment (Apple-Style) */}
+                <div className="border border-slate-200 rounded-2xl p-4 bg-slate-50/50 space-y-3">
+                  <label className="font-bold text-slate-800 uppercase tracking-wide text-[9px] flex items-center gap-1">
+                    <Mic className="h-3.5 w-3.5 text-indigo-500" /> Firma de Voz del Dueño (Voice Print)
+                  </label>
+                  <p className="text-[10px] text-slate-500 leading-relaxed font-semibold leading-normal">
+                    Calibra tu voz para que la IA te reconozca automáticamente como orador en todas tus grabaciones de forma biométrica.
+                  </p>
+
+                  <div className="bg-white border border-slate-150 p-3 rounded-xl space-y-2.5 shadow-3xs">
+                    <div className="text-[9px] font-bold text-indigo-600 bg-indigo-50/60 p-2.5 rounded-lg border border-indigo-100 leading-normal">
+                      🎙️ <span className="font-black uppercase">Frase de calibración:</span> "Hola, soy el dueño de esta cuenta de PLAUD y este es mi registro de voz oficial para mi firma de voz."
+                    </div>
+
+                    <div className="flex items-center gap-3">
+                      {isRecordingVoiceSig ? (
+                        <button
+                          type="button"
+                          onClick={stopVoiceSigRecording}
+                          className="px-3 py-2 rounded-lg bg-rose-600 hover:bg-rose-700 text-white font-bold flex items-center gap-1.5 transition active:scale-95 cursor-pointer text-[10px]"
+                        >
+                          <span className="w-2 h-2 rounded-full bg-white animate-ping shrink-0" />
+                          Parar ({voiceSigTimer}s)
+                        </button>
+                      ) : (
+                        <button
+                          type="button"
+                          onClick={startVoiceSigRecording}
+                          className="px-3 py-2 rounded-lg bg-indigo-600 hover:bg-indigo-700 text-white font-bold flex items-center gap-1 transition active:scale-95 cursor-pointer text-[10px]"
+                        >
+                          🎤 Calibrar Voz
+                        </button>
+                      )}
+
+                      {voiceSignatureBase64 ? (
+                        <div className="flex items-center gap-2 flex-1 justify-end">
+                          <span className="text-[9.5px] font-extrabold text-emerald-600 bg-emerald-50 border border-emerald-100 px-2 py-0.5 rounded">
+                            ✓ Registrada
+                          </span>
+                          <button
+                            type="button"
+                            onClick={handleClearVoiceSig}
+                            className="p-1 text-slate-450 hover:text-rose-600 rounded transition cursor-pointer text-xs"
+                            title="Eliminar calibración de voz"
+                          >
+                            🗑️
+                          </button>
+                        </div>
+                      ) : (
+                        <span className="text-[9.5px] text-slate-400 font-semibold flex-1 text-right">
+                          Sin registrar
+                        </span>
+                      )}
+                    </div>
+                  </div>
+                </div>
+
                 {/* GCP Tenant Resources (Read-Only auditing stats) */}
                 <div className="border border-slate-100 p-3.5 rounded-xl space-y-2 bg-slate-50/50">
                   <h4 className="font-bold text-slate-800 text-[10px] uppercase tracking-wider">Recursos GCP Activos (Plaud-own)</h4>
@@ -1891,7 +2522,7 @@ This workspace was custom-curated in **⚡ Turbo Fast-Track Mode** to bypass bro
                 <button
                   type="button"
                   disabled={savingProfile}
-                  onClick={() => handleSaveProfile(companyName)}
+                  onClick={() => handleSaveProfile(companyName, frequentSpeakers)}
                   className="px-4 py-2 text-xs font-bold text-white bg-indigo-600 hover:bg-indigo-700 rounded-lg shadow-sm transition cursor-pointer disabled:opacity-50"
                 >
                   {savingProfile ? "Guardando..." : "Guardar Cambios"}
