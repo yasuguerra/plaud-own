@@ -309,6 +309,7 @@ export default function App() {
   const [isChatOpen, setIsChatOpen] = useState(false);
   const [isSidebarCollapsed, setIsSidebarCollapsed] = useState(false);
   const [selectedTemplateId, setSelectedTemplateId] = useState("client-needs");
+  const [activePreviewTemplateId, setActivePreviewTemplateId] = useState<string | null>(null);
   const [frequentSpeakers, setFrequentSpeakers] = useState("");
   const [activeSidebarTab, setActiveSidebarTab] = useState<"history" | "templates">("history");
   const [isPlaying, setIsPlaying] = useState(false);
@@ -1717,13 +1718,13 @@ This workspace was custom-curated in **⚡ Turbo Fast-Track Mode** to bypass bro
                       return (
                         <button
                           key={tpl.id}
-                          onClick={() => setSelectedTemplateId(tpl.id)}
+                          onClick={() => setActivePreviewTemplateId(tpl.id)}
                           className={`text-left text-xs font-bold px-3 py-2.5 rounded-xl transition flex flex-col gap-1 border cursor-pointer ${
                             isSelected 
                               ? "bg-slate-900 border-slate-900 text-white shadow-2xs" 
                               : "bg-slate-50 border-slate-200/50 text-slate-700 hover:bg-slate-100/50 hover:border-slate-250"
                           }`}
-                          title={tpl.description}
+                          title="Haz clic para ver detalles y previsualizar estructura"
                         >
                           <span className="font-extrabold truncate block w-full">{tpl.name}</span>
                           <span className={`text-[9px] font-medium leading-none ${isSelected ? "text-indigo-200 text-slate-300" : "text-slate-400"}`}>
@@ -2384,6 +2385,88 @@ This workspace was custom-curated in **⚡ Turbo Fast-Track Mode** to bypass bro
 
           </section>
         )}
+
+        {/* Template Detail Preview Modal (Capture 2) */}
+        {activePreviewTemplateId && (() => {
+          const tpl = SUMMARY_TEMPLATES.find(t => t.id === activePreviewTemplateId);
+          if (!tpl) return null;
+          return (
+            <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-xs flex items-center justify-center p-4 z-50 animate-fade-in font-sans">
+              <div className="bg-white rounded-3xl border border-slate-200 shadow-2xl max-w-xl w-full flex flex-col p-6 md:p-8 space-y-5 animate-scale-up">
+                <div className="flex items-center justify-between border-b border-slate-100 pb-4 shrink-0">
+                  <div className="flex items-center gap-3">
+                    <div className="h-10 w-10 rounded-xl bg-indigo-50 border border-indigo-100 flex items-center justify-center text-indigo-600 shrink-0">
+                      <BookOpen className="h-5 w-5" />
+                    </div>
+                    <div>
+                      <h3 className="font-sans font-black text-slate-900 text-lg leading-tight">{tpl.name}</h3>
+                      <div className="flex items-center gap-2 mt-1">
+                        <span className="text-[10px] text-slate-500 font-bold bg-slate-100 px-2 py-0.5 rounded-full uppercase tracking-wider">
+                          {tpl.category}
+                        </span>
+                        <span className="text-[10px] text-slate-400 font-semibold">• Outlines Active</span>
+                      </div>
+                    </div>
+                  </div>
+                  <button 
+                    onClick={() => setActivePreviewTemplateId(null)}
+                    className="text-slate-400 hover:text-slate-600 font-bold text-sm cursor-pointer p-1 rounded-lg hover:bg-slate-50"
+                  >
+                    ✕
+                  </button>
+                </div>
+                
+                <div className="space-y-4 overflow-y-auto max-h-[60vh] pr-1 font-sans text-xs text-slate-650 leading-relaxed">
+                  <div>
+                    <h4 className="font-extrabold text-slate-800 uppercase tracking-wider text-[9.5px] mb-1.5">Description</h4>
+                    <p className="text-slate-600 font-normal leading-relaxed text-[12.5px]">
+                      {tpl.description}
+                    </p>
+                  </div>
+
+                  <div className="border-t border-slate-100 pt-3.5">
+                    <h4 className="font-extrabold text-slate-800 uppercase tracking-wider text-[9.5px] mb-2">OUTLINE</h4>
+                    <ul className="space-y-2.5 pl-1">
+                      {tpl.outlinePoints.map((pt, ptIdx) => (
+                        <li key={ptIdx} className="flex gap-2 items-start text-[11.5px] text-slate-650 leading-relaxed">
+                          <span className="text-indigo-500 shrink-0 font-extrabold text-[13px] mt-[-2px]">•</span>
+                          <span className="font-normal text-slate-650">{pt}</span>
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+                </div>
+                
+                <div className="flex items-center justify-end gap-3 pt-4 border-t border-slate-100 shrink-0 flex-wrap">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setSelectedTemplateId(tpl.id);
+                      setActivePreviewTemplateId(null);
+                    }}
+                    className="px-4 py-2 text-xs font-extrabold text-slate-600 hover:bg-slate-50 rounded-xl transition cursor-pointer border border-slate-200"
+                  >
+                    Set for next use
+                  </button>
+                  {activeSession && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setSelectedTemplateId(tpl.id);
+                        setActivePreviewTemplateId(null);
+                        // Trigger immediate re-summarization
+                        setTimeout(() => handleReprocessSummary(), 100);
+                      }}
+                      className="px-4.5 py-2 text-xs font-black text-white bg-slate-900 hover:bg-indigo-600 rounded-xl transition cursor-pointer shadow-xs active:scale-95"
+                    >
+                      Regenerate current session with this format
+                    </button>
+                  )}
+                </div>
+              </div>
+            </div>
+          );
+        })()}
 
         {/* AI Topic Synthesis Overlay Modal */}
         {selectedSynthesisFolderId && (() => {
