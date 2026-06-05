@@ -858,7 +858,7 @@ app.post("/api/process", async (req, res) => {
       }];
 
     } else {
-      // The user uploaded an actual mic recording or media file!
+      // Real mic recording upload: Run asynchronously in background!
       if (!base64Data || !mimeType) {
         res.status(400).json({ error: "Missing uploaded file data (base64Data) or mimeType" });
         return;
@@ -866,161 +866,111 @@ app.post("/api/process", async (req, res) => {
 
       const cleanMime = mimeType.split(";")[0].trim();
       const rawSizeBytes = Math.round(base64Data.length * 0.75);
-      console.log(`Processing direct uploaded material: Name: ${mediaName || "user_upload"}, Type: ${mediaType}, Size: ${Math.round(rawSizeBytes / 1024 / 1024)}MB, Mime: ${mimeType} (cleaned: ${cleanMime})`);
+      const sessionId = "sess_" + Date.now().toString(36);
 
-      const contentPromptText = `You are an advanced multimedia processor. Carefully analyze this uploaded ${mediaType || 'lecture media'} file: "${mediaName || 'Lecture Recording'}".
-      Please listen to the audio carefully and transcribe or reconstruct the exact narrative flow as the transcript, timestamping key changes.
-      Then, generate a comprehensive study session including:
-      1. An academic and professional title.
-      2. A beautiful detailed summary/resume in formatted Markdown based on the template layout: "${selectedTemplate.name}".
-      3. A complete timestamped narrative transcript or detailed chapter layout.
-      4. Structured follow-up Action Items.
-      5. A highly descriptive Mind Map concept hierarchy matching the MindMapNode schema structure.
-      6. Five to seven highly engaging study flashcards testing main concept outcomes.
-      
-      Generate fully populated and valid results in JSON format according to the supplied responseSchema.${speakerContext}
-      
-      CRITICAL REQUIREMENT: You MUST automatically detect the language spoken or written in the source audio/video/document (e.g. Spanish, English). All generated text fields (title, summary, transcript, actionItems, mindMap, flashcards) MUST be entirely in that detected language. Do not translate the content; write it fully in the detected language (for example, if the input is in Spanish, everything must be in Spanish).`;
-
-      // Optimized Inline upload for fast processing and zero File API polling delays (< 15MB)
-      if (rawSizeBytes < 15 * 1024 * 1024) {
-        console.log(`Using optimized high-fidelity INLINE payload for fast transcription...`);
-        contentsPayload = [
+      // Create initial placeholder doc in Firestore with status 'processing'
+      const initialSession = {
+        id: sessionId,
+        userId: userId,
+        title: mediaName || "Calibrando audio...",
+        createdAt: new Date().toISOString(),
+        mediaType: mediaType || 'audio',
+        mediaName: mediaName || "mecanica_audio",
+        status: "processing",
+        summary: "### Procesando tu audio de fondo...\nPor favor espera mientras la IA realiza la transcripción diarizada por oradores y la síntesis con la plantilla seleccionada. Puedes navegar libremente por la app.",
+        transcript: "[00:00] Transcribiendo conversación...",
+        actionItems: [],
+        mindMap: { id: "root", label: "Procesando...", details: "" },
+        flashcards: [],
+        chatHistory: [
           {
-            inlineData: {
-              data: base64Data,
-              mimeType: cleanMime,
-            }
-          },
-          {
-            text: contentPromptText
+            id: "welcome_msg",
+            role: "model" as const,
+            content: "Tu grabación se está transcribiendo y procesando de forma asíncrona de fondo con Gemini. Cerramos la conexión para evitar timeouts. Te depararemos un informe completo de inmediato.",
+            timestamp: new Date().toISOString()
           }
-        ];
-      } else {
-        // Fall back to GCS and Vertex AI for heavier uploaded files to bypass Files API limits completely!
-        console.log(`Using GCS fallback for direct uploads...`);
-        let safeName = (mediaName || "user_upload").replace(/[^a-zA-Z0-9.-]/g, "_");
-        if (!safeName.includes(".")) {
-          const ext = getExtensionFromMimeType(cleanMime);
-          safeName = `${safeName}.${ext}`;
-        }
-        const tempFilePath = path.join("/tmp", `${Date.now()}_${safeName}`);
-        
+        ]
+      };
+
+      console.log(`[ASYNC PROCESS] Saving initial processing placeholder session: ${sessionId}`);
+      await firestore.collection("sessions").doc(sessionId).set(initialSession);
+
+      // Immediately return the 202 status and placeholder object to the client
+      res.status(202).json(initialSession);
+
+      // Trigger background worker
+      (async () => {
         try {
-          const buffer = Buffer.from(base64Data, "base64");
-          fs.writeFileSync(tempFilePath, buffer);
-          console.log(`Temp file written to: ${tempFilePath} (${buffer.length} bytes)`);
+          const contentPromptText = `You are an advanced multimedia processor. Carefully analyze this uploaded ${mediaType || 'lecture media'} file: "${mediaName || 'Lecture Recording'}".
+          Please listen to the audio carefully and transcribe or reconstruct the exact narrative flow as the transcript, timestamping key changes.
+          Then, generate a comprehensive study session including:
+          1. An academic and professional title.
+          2. A beautiful detailed summary/resume in formatted Markdown based on the template layout: "${selectedTemplate.name}".
+          3. A complete timestamped narrative transcript or detailed chapter layout.
+          4. Structured follow-up Action Items.
+          5. A highly descriptive Mind Map concept hierarchy matching the MindMapNode schema structure.
+          6. Five to seven highly engaging study flashcards testing main concept outcomes.
+          
+          Generate fully populated and valid results in JSON format according to the supplied responseSchema.${speakerContext}
+          
+          CRITICAL REQUIREMENT: You MUST automatically detect the language spoken or written in the source audio/video/document (e.g. Spanish, English). All generated text fields (title, summary, transcript, actionItems, mindMap, flashcards) MUST be entirely in that detected language. Do not translate the content; write it fully in the detected language (for example, if the input is in Spanish, everything must be in Spanish).`;
 
-          const sessionId = "sess_" + Date.now().toString(36);
-          const gcsDestination = `audios/${sessionId}_${safeName}`;
-          if (isDeveloperApiMode()) {
-            // Developer API cannot read gs:// URIs — upload via the Files API instead.
-            console.log("[UPLOAD] Developer API mode: routing large file through the Gemini Files API...");
-          } else {
-            gcsUri = await uploadToGCS(tempFilePath, gcsDestination, cleanMime);
-          }
-
-          if (!gcsUri) {
-            console.log("[UPLOAD FALLBACK] GCS Upload returned empty. Falling back to Gemini Files API upload...");
-            const fileRef = await ai.files.upload({
-              file: tempFilePath,
-              config: {
+          const inlinePayload = [
+            {
+              inlineData: {
+                data: base64Data,
                 mimeType: cleanMime,
-                displayName: mediaName || "user_upload",
               }
-            });
-            geminiFileUri = fileRef.uri || "";
-            console.log(`[UPLOAD FALLBACK] Gemini Files API upload completed. URI: ${geminiFileUri}`);
-          }
-        } catch (uploadError: any) {
-          console.error("GCS Upload failed, attempting Gemini Files fallback...", uploadError);
-          try {
-            const fileRef = await ai.files.upload({
-              file: tempFilePath,
-              config: {
-                mimeType: cleanMime,
-                displayName: mediaName || "user_upload",
+            },
+            {
+              text: contentPromptText
+            }
+          ];
+
+          console.log(`[ASYNC PROCESS BG] Triggering Gemini API generation for ${sessionId}...`);
+          const response = await generateWithFallback({
+            model: "gemini-2.5-flash",
+            contents: inlinePayload,
+            config: {
+              responseMimeType: "application/json",
+              responseSchema: currentResponseSchema,
+              temperature: 0.2
+            }
+          });
+
+          const parsedText = response.text;
+          if (!parsedText) throw new Error("No response generated by Gemini in background.");
+
+          const parsedStudySession = JSON.parse(parsedText.trim());
+
+          const completedSession = {
+            ...initialSession,
+            ...parsedStudySession,
+            status: "completed",
+            chatHistory: [
+              {
+                id: "welcome_msg",
+                role: "model" as const,
+                content: `¡Listo! He analizado tu grabación de reunión **"${mediaName}"** y he sintetizado "${parsedStudySession.title}" siguiendo la plantilla de formato elegida.`,
+                timestamp: new Date().toISOString()
               }
-            });
-            geminiFileUri = fileRef.uri || "";
-            console.log(`[UPLOAD FALLBACK] Gemini Files API upload completed on catch. URI: ${geminiFileUri}`);
-          } catch (geminiErr: any) {
-            console.error("Gemini Files fallback upload failed too:", geminiErr);
-            const classified = classifyError(geminiErr);
-            res.status(classified.errorType === "AUTH" ? 401 : 400).json({
-              error: `Failed to upload or process file: ${classified.message}`,
-              errorType: classified.errorType
-            });
-            return;
-          }
-        } finally {
-          try {
-            if (fs.existsSync(tempFilePath)) {
-              fs.unlinkSync(tempFilePath);
-            }
-          } catch (cleanupErr) {
-            console.error("Failed to delete temp file:", cleanupErr);
-          }
+            ]
+          };
+
+          await firestore.collection("sessions").doc(sessionId).set(completedSession);
+          console.log(`[ASYNC PROCESS BG] Successfully completed and stored session ${sessionId}`);
+
+        } catch (bgErr: any) {
+          console.error(`[ASYNC PROCESS BG ERROR] Session ${sessionId} failed:`, bgErr);
+          await firestore.collection("sessions").doc(sessionId).update({
+            status: "failed",
+            summary: `### ❌ Falla en el análisis de materiales\nEl procesamiento de fondo para tu archivo encontró un obstáculo:\n${bgErr.message || bgErr}`,
+            error: bgErr.message || "An unexpected error occurred."
+          });
         }
-
-        contentsPayload = [
-          {
-            fileData: {
-              fileUri: gcsUri || geminiFileUri,
-              mimeType: cleanMime,
-            }
-          },
-          {
-            text: contentPromptText
-          }
-        ];
-      }
+      })();
+      return;
     }
-
-    const response = await generateWithFallback({
-      model: "gemini-2.5-flash",
-      contents: contentsPayload,
-      config: {
-        responseMimeType: "application/json",
-        responseSchema: currentResponseSchema,
-        temperature: 0.2 // lowers random outputs for predictable study mapping formats
-      }
-    });
-
-    const parsedText = response.text;
-    if (!parsedText) {
-      throw new Error("No response output text was generated by Gemini.");
-    }
-
-    // Try parsing the output text as JSON
-    let parsedStudySession;
-    try {
-      parsedStudySession = JSON.parse(parsedText.trim());
-    } catch (parseErr) {
-      console.error("JSON parsing error of Gemini output. Output was:", parsedText);
-      throw new Error("Gemini generated study content, but it was not formatted in conformant JSON. Please retry.");
-    }
-
-    // Wrap in local identity and return
-    const formattedResult = {
-      id: "sess_" + Date.now().toString(36),
-      createdAt: new Date().toISOString(),
-      mediaType: mediaType || (sampleType ? 'audio' : 'audio'),
-      mediaName: mediaName || "Academic Lecture Study Session",
-      gcsUri: gcsUri || geminiFileUri,
-      ...parsedStudySession,
-      chatHistory: [
-        {
-          id: "welcome_msg",
-          role: "model" as const,
-          content: `Hi there! I am your AI Study Companion. I have analyzed "${parsedStudySession.title}" and generated a markdown summary, interactive mind map, checklist action items, and flashcards. Let me know if you want me to clarify anything or quiz you on this material!`,
-          timestamp: new Date().toISOString()
-        }
-      ]
-    };
-
-    res.json(formattedResult);
-
   } catch (error: any) {
     console.warn("[PROCESS ERROR] Initiating high-fidelity fallback or returning error:", error);
     // If it's a real file upload or written text from the user, do NOT silently fall back to mock data!
@@ -1086,164 +1036,177 @@ app.post("/api/upload-file", upload.single("file"), async (req, res) => {
     const currentResponseSchema = JSON.parse(JSON.stringify(studyResponseSchema));
     currentResponseSchema.properties.summary.description = `A beautifully detailed markdown executive summary structured strictly following the layout, headers, blockquotes, and lists of this template:\n${selectedTemplate.prompt}`;
 
-    // Pre-generate session ID and upload file to GCS under tenant account
+    // Pre-generate session ID
     const sessionId = "sess_" + Date.now().toString(36);
-    const gcsDestination = `audios/${sessionId}_${mediaName}`;
-    
-    let gcsUri = "";
-    try {
-      if (isDeveloperApiMode()) {
-        // Developer API cannot read gs:// URIs — the Files API path below will handle the upload.
-        console.log("[UPLOAD-FILE] Developer API mode: routing file through the Gemini Files API...");
-      } else {
-        gcsUri = await uploadToGCS(tempFilePath, gcsDestination, cleanMime);
-      }
-    } catch (gcsErr) {
-      console.warn("[GCS WARNING] Failed to upload to GCS, falling back to Gemini Files API:", gcsErr);
-    }
 
-    const ai = getGeminiClient();
-    let contentsPayload: any[] = [];
-    let geminiFileUri = "";
-
-    // Optimize plain-text files by reading them directly on the server (saves File API roundtrips/polling!)
-    const isPlainText = cleanMime.startsWith("text/") || mediaName.endsWith(".txt") || mediaName.endsWith(".md") || mediaName.endsWith(".csv") || mediaName.endsWith(".json");
-
-    if (isPlainText) {
-      const textContent = fs.readFileSync(tempFilePath, "utf8");
-      
-      // Clean up local temp file
-      try {
-        fs.unlinkSync(tempFilePath);
-      } catch (err) {
-        console.error("Failed to delete temp text file:", err);
-      }
-
-      contentsPayload = [{
-        text: `Analyze the following lecture notes or document text: "${mediaName}". Generate a high-fidelity summarized study companion following the structural responseSchema:
-        
-        === DOCUMENT CONTENT ===
-        ${textContent}
-        === END DOCUMENT CONTENT ===
-        
-        Make sure the mindMap structure is complete, featuring colorful, helpful levels of root topic, sub-topic, and subtopic children details.`
-      }];
-    } else {
-      // PDF or Audio or Video - Process natively via Vertex AI from GCS Uri
-      if (!gcsUri) {
-        console.log("[UPLOAD-FILE FALLBACK] GCS Upload failed or empty. Attempting Gemini Files API upload...");
-        try {
-          const fileRef = await ai.files.upload({
-            file: tempFilePath,
-            config: {
-              mimeType: cleanMime,
-              displayName: mediaName,
-            }
-          });
-          geminiFileUri = fileRef.uri || "";
-          console.log(`[UPLOAD-FILE FALLBACK] Gemini Files upload successful: ${geminiFileUri}`);
-        } catch (geminiErr: any) {
-          console.error("[UPLOAD-FILE FALLBACK ERROR] Gemini Files upload failed:", geminiErr);
-          const classified = classifyError(geminiErr);
-          res.status(classified.errorType === "AUTH" ? 401 : 500).json({
-            error: `File processing failed (both GCS and Gemini Files API uploads failed): ${classified.message}`,
-            errorType: classified.errorType
-          });
-          return;
-        }
-      }
-
-      // Clean up the local temp file since it is now uploaded to GCS or Gemini Files!
-      try {
-        if (fs.existsSync(tempFilePath)) {
-          fs.unlinkSync(tempFilePath);
-        }
-        console.log(`[PROCESO] Temp file cleaned up. Processing via URI: ${gcsUri || geminiFileUri}`);
-      } catch (cleanupErr) {
-        console.error("Failed to delete temp file:", cleanupErr);
-      }
-
-      let contentPromptText = "";
-      if (mimeType.includes("pdf")) {
-        contentPromptText = `You are a world-class academic summaries analyzer. Carefully study the uploaded PDF document: "${mediaName}".
-        Read and analyze every page. Capture key ideas, structures, formulas, and conclusions, and compile a high-fidelity study companion.`;
-      } else {
-        contentPromptText = `You are an advanced multimedia processor. Carefully analyze this uploaded ${mediaType || 'lecture media'} file: "${mediaName}".
-        Reconstruct the exact narrative flow as the transcript, timestamping key changes. Then compile a high-fidelity study suite.`;
-      }
-
-      contentsPayload = [
-        {
-          fileData: {
-            fileUri: gcsUri || geminiFileUri,
-            mimeType: cleanMime,
-          }
-        },
-        {
-          text: `${contentPromptText}
-          
-          Generate fully populated and valid results in JSON format according to the supplied responseSchema:
-          1. An academic and professional title.
-          2. A beautiful detailed summary/resume in formatted Markdown based on the template layout: "${selectedTemplate.name}".
-          3. A complete timestamped narrative transcript or detailed chapter layout.
-          4. Structured follow-up Action Items.
-          5. A highly descriptive Mind Map concept hierarchy matching the MindMapNode schema structure.
-          6. Five to seven highly engaging study flashcards testing main concept outcomes.
-          
-          Generate fully populated and valid results in JSON format according to the supplied responseSchema.${speakerContext}
-          
-          CRITICAL REQUIREMENT: You MUST automatically detect the language spoken or written in the source audio/video/document (e.g. Spanish, English). All generated text fields (title, summary, transcript, actionItems, mindMap, flashcards) MUST be entirely in that detected language. Do not translate the content; write it fully in the detected language (for example, if the input is in Spanish, everything must be in Spanish).`
-        }
-      ];
-    }
-
-    console.log("Generating study companion from Gemini...");
-    const response = await generateWithFallback({
-      model: "gemini-2.5-flash",
-      contents: contentsPayload,
-      config: {
-        responseMimeType: "application/json",
-        responseSchema: currentResponseSchema,
-        temperature: 0.2
-      }
-    });
-
-    const parsedText = response.text;
-    if (!parsedText) {
-      throw new Error("No response output text was generated by Gemini.");
-    }
-
-    let parsedStudySession;
-    try {
-      parsedStudySession = JSON.parse(parsedText.trim());
-    } catch (parseErr) {
-      console.error("JSON parsing error of Gemini output. Output was:", parsedText);
-      throw new Error("Gemini generated study content, but it was not formatted in conformant JSON. Please retry.");
-    }
-
-    // Wrap in local identity and return
-    const formattedResult = {
+    // Create initial placeholder session doc in Firestore with status 'processing'
+    const initialSession = {
       id: sessionId,
-      userId: userId, // Attach User ID
+      userId: userId,
+      title: mediaName || "Procesando audio...",
       createdAt: new Date().toISOString(),
-      mediaType: mediaType || (mimeType.includes("pdf") ? "pdf" : "audio"),
-      mediaName: mediaName,
-      gcsUri: gcsUri || geminiFileUri, // Store GCS URI
-      ...parsedStudySession,
+      mediaType: mediaType || 'audio',
+      mediaName: mediaName || "Uploaded File",
+      status: "processing",
+      summary: "### Procesando tu audio de fondo...\nPor favor espera de 1 a 3 minutos mientras la IA realiza la transcripción diarizada por oradores y la síntesis con la plantilla seleccionada. Puedes navegar libremente por la app.",
+      transcript: "[00:00] Transcribiendo conversación...",
+      actionItems: [],
+      mindMap: { id: "root", label: "Procesando...", details: "" },
+      flashcards: [],
       chatHistory: [
         {
           id: "welcome_msg",
           role: "model" as const,
-          content: `Hi there! I am your AI Study Companion. From your uploaded ${mimeType.includes("pdf") ? "PDF document" : "file"} **"${mediaName}"**, I have synthesized "${parsedStudySession.title}". It features an academic summary, interactive mind map coordinate grid, checklist items, and active recall flashcards. Ask me anything or request a quiz!`,
+          content: "Tu archivo se está transcribiendo y procesando de forma asíncrona de fondo con Gemini. Cerramos la conexión para evitar timeouts. Te depararemos un informe completo de inmediato.",
           timestamp: new Date().toISOString()
         }
       ]
     };
 
-    res.json(formattedResult);
+    console.log(`[ASYNC UPLOAD] Saving initial processing placeholder session: ${sessionId}`);
+    await firestore.collection("sessions").doc(sessionId).set(initialSession);
+
+    // Immediately return the 202 status and placeholder object to the client
+    res.status(202).json(initialSession);
+
+    // Trigger background worker
+    (async () => {
+      let gcsUri = "";
+      let geminiFileUri = "";
+      try {
+        const gcsDestination = `audios/${sessionId}_${mediaName}`;
+        try {
+          if (isDeveloperApiMode()) {
+            // Developer API cannot read gs:// URIs — the Files API path below will handle the upload.
+            console.log("[UPLOAD-FILE BG] Developer API mode: routing file through the Gemini Files API...");
+          } else {
+            gcsUri = await uploadToGCS(tempFilePath, gcsDestination, cleanMime);
+          }
+        } catch (gcsErr) {
+          console.warn("[GCS WARNING BG] Failed to upload to GCS, falling back to Gemini Files API:", gcsErr);
+        }
+
+        const ai = getGeminiClient();
+        let contentsPayload: any[] = [];
+
+        // Optimize plain-text files by reading them directly on the server (saves File API roundtrips/polling!)
+        const isPlainText = cleanMime.startsWith("text/") || mediaName.endsWith(".txt") || mediaName.endsWith(".md") || mediaName.endsWith(".csv") || mediaName.endsWith(".json");
+
+        if (isPlainText) {
+          const textContent = fs.readFileSync(tempFilePath, "utf8");
+          contentsPayload = [{
+            text: `Analyze the following lecture notes or document text: "${mediaName}". Generate a high-fidelity summarized study companion following the structural responseSchema:
+            
+            === DOCUMENT CONTENT ===
+            ${textContent}
+            === END DOCUMENT CONTENT ===
+            
+            Make sure the mindMap structure is complete, featuring colorful, helpful levels of root topic, sub-topic, and subtopic children details.`
+          }];
+        } else {
+          // PDF or Audio or Video - Process natively via Vertex AI from GCS Uri
+          if (!gcsUri) {
+            console.log("[UPLOAD-FILE BG FALLBACK] GCS Upload failed or empty. Attempting Gemini Files API upload...");
+            const fileRef = await ai.files.upload({
+              file: tempFilePath,
+              config: {
+                mimeType: cleanMime,
+                displayName: mediaName,
+              }
+            });
+            geminiFileUri = fileRef.uri || "";
+            console.log(`[UPLOAD-FILE BG FALLBACK] Gemini Files upload successful: ${geminiFileUri}`);
+          }
+
+          let contentPromptText = "";
+          if (cleanMime.includes("pdf")) {
+            contentPromptText = `You are a world-class academic summaries analyzer. Carefully study the uploaded PDF document: "${mediaName}".
+            Read and analyze every page. Capture key ideas, structures, formulas, and conclusions, and compile a high-fidelity study companion.`;
+          } else {
+            contentPromptText = `You are an advanced multimedia processor. Carefully analyze this uploaded ${mediaType || 'lecture media'} file: "${mediaName}".
+            Reconstruct the exact narrative flow as the transcript, timestamping key changes. Then compile a high-fidelity study suite.`;
+          }
+
+          contentsPayload = [
+            {
+              fileData: {
+                fileUri: gcsUri || geminiFileUri,
+                mimeType: cleanMime,
+              }
+            },
+            {
+              text: `${contentPromptText}
+              
+              Generate fully populated and valid results in JSON format according to the supplied responseSchema:
+              1. An academic and professional title.
+              2. A beautiful detailed summary/resume in formatted Markdown based on the template layout: "${selectedTemplate.name}".
+              3. A complete timestamped narrative transcript or detailed chapter layout.
+              4. Structured follow-up Action Items.
+              5. A highly descriptive Mind Map concept hierarchy matching the MindMapNode schema structure.
+              6. Five to seven highly engaging study flashcards testing main concept outcomes.
+              
+              Generate fully populated and valid results in JSON format according to the supplied responseSchema.${speakerContext}
+              
+              CRITICAL REQUIREMENT: You MUST automatically detect the language spoken or written in the source audio/video/document (e.g. Spanish, English). All generated text fields (title, summary, transcript, actionItems, mindMap, flashcards) MUST be entirely in that detected language. Do not translate the content; write it fully in the detected language (for example, if the input is in Spanish, everything must be in Spanish).`
+            }
+          ];
+        }
+
+        console.log("[UPLOAD-FILE BG] Generating study companion from Gemini...");
+        const response = await generateWithFallback({
+          model: "gemini-2.5-flash",
+          contents: contentsPayload,
+          config: {
+            responseMimeType: "application/json",
+            responseSchema: currentResponseSchema,
+            temperature: 0.2
+          }
+        });
+
+        const parsedText = response.text;
+        if (!parsedText) throw new Error("No response output text was generated by Gemini.");
+
+        const parsedStudySession = JSON.parse(parsedText.trim());
+
+        const completedSession = {
+          ...initialSession,
+          ...parsedStudySession,
+          status: "completed",
+          gcsUri: gcsUri || geminiFileUri,
+          chatHistory: [
+            {
+              id: "welcome_msg",
+              role: "model" as const,
+              content: `¡Listo! He analizado tu archivo **"${mediaName}"** y he sintetizado "${parsedStudySession.title}" siguiendo la plantilla de formato elegida.`,
+              timestamp: new Date().toISOString()
+            }
+          ]
+        };
+
+        await firestore.collection("sessions").doc(sessionId).set(completedSession);
+        console.log(`[UPLOAD-FILE BG] Successfully completed and stored session ${sessionId}`);
+
+      } catch (bgErr: any) {
+        console.error(`[UPLOAD-FILE BG ERROR] Session ${sessionId} failed:`, bgErr);
+        await firestore.collection("sessions").doc(sessionId).update({
+          status: "failed",
+          summary: `### ❌ Falla en el análisis de materiales\nEl procesamiento de fondo para tu archivo encontró un obstáculo:\n${bgErr.message || bgErr}`,
+          error: bgErr.message || "An unexpected error occurred."
+        });
+      } finally {
+        // Clean up the local temp file since it is now processed!
+        try {
+          if (fs.existsSync(tempFilePath)) {
+            fs.unlinkSync(tempFilePath);
+          }
+        } catch (cleanupErr) {
+          console.error("Failed to delete temp file:", cleanupErr);
+        }
+      }
+    })();
 
   } catch (error: any) {
-    console.warn("[MULTIPART PROCESS ERROR] Failed to process real file:", error);
+    console.warn("[UPLOAD-FILE ERROR] Failed to initialize upload:", error);
     const classified = classifyError(error);
     res.status(classified.errorType === "AUTH" ? 401 : 500).json(classified);
   }
@@ -1520,6 +1483,27 @@ app.get("/api/sessions", async (req, res, next) => {
     res.json(sessions);
   } catch (error: any) {
     console.error("[FIRESTORE ERROR] Failed to fetch sessions:", error);
+    next(error);
+  }
+});
+
+// 1b. Check status of a background-processed session from Firestore
+app.get("/api/sessions/:id/status", async (req, res, next) => {
+  try {
+    const { id } = req.params;
+    const doc = await firestore.collection("sessions").doc(id).get();
+    if (!doc.exists) {
+      res.status(404).json({ error: "Session not found" });
+      return;
+    }
+    const data = doc.data();
+    res.json({
+      status: data?.status || "completed",
+      error: data?.error || null,
+      title: data?.title || data?.mediaName || "Procesando..."
+    });
+  } catch (error: any) {
+    console.error("[FIRESTORE ERROR] Failed to fetch session status:", error);
     next(error);
   }
 });

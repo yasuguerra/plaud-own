@@ -747,6 +747,59 @@ This workspace was custom-curated in **⚡ Turbo Fast-Track Mode** to bypass bro
   };
 
   // Submit media to processing endpoint
+  // Maintain a tracking set to prevent starting multiple pollers for the same session ID
+  const activePollersRef = React.useRef<Set<string>>(new Set());
+
+  const pollSessionStatus = (sessionId: string, localAudioUrl?: string) => {
+    if (activePollersRef.current.has(sessionId)) return;
+    activePollersRef.current.add(sessionId);
+
+    console.log(`[POLLING] Initiating status poller for session: ${sessionId}`);
+    const interval = setInterval(async () => {
+      try {
+        const response = await fetch(`/api/sessions/${sessionId}/status`);
+        if (response.ok) {
+          const data = await response.json();
+          console.log(`[POLLING] Status for ${sessionId}:`, data.status);
+          
+          if (data.status === "completed" || data.status === "failed") {
+            clearInterval(interval);
+            activePollersRef.current.delete(sessionId);
+            
+            // Reload all sessions from Firestore to reflect the newly processed data
+            const userId = user ? user.uid : "guest";
+            const resSessions = await fetch("/api/sessions", { headers: { "x-user-id": userId } });
+            if (resSessions.ok) {
+              const list: StudySession[] = await resSessions.json();
+              // Preserve the local blob URL so playback continues to work
+              const updatedList = list.map(s => {
+                if (s.id === sessionId && localAudioUrl) {
+                  return { ...s, localAudioUrl };
+                }
+                return s;
+              });
+              setSessions(updatedList);
+              localStorage.setItem("study_buddy_sessions", JSON.stringify(updatedList));
+            }
+          }
+        }
+      } catch (err) {
+        console.error("[POLLING ERROR] Failed to fetch session status:", err);
+      }
+    }, 5000);
+  };
+
+  // Start pollers automatically for any in-progress sessions found on startup
+  useEffect(() => {
+    if (sessions.length > 0) {
+      sessions.forEach(s => {
+        if (s.status === "processing") {
+          pollSessionStatus(s.id, s.localAudioUrl);
+        }
+      });
+    }
+  }, [sessions.length]);
+
   const processStudyContent = async (payload: {
     mediaName: string;
     mediaType: "audio" | "video";
@@ -764,7 +817,7 @@ This workspace was custom-curated in **⚡ Turbo Fast-Track Mode** to bypass bro
 
     try {
       // Start simulator parallel with real server fetch to make the experience cinematic
-      const delayPromise = simulateLoadingStages(!payload.isSample);
+      const delayPromise = payload.isSample ? simulateLoadingStages(false) : Promise.resolve();
       
       const userId = user ? user.uid : "guest";
       const fetchPromise = fetch("/api/process", {
@@ -808,7 +861,13 @@ This workspace was custom-curated in **⚡ Turbo Fast-Track Mode** to bypass bro
       saveSessions(newList);
       setActiveSessionId(completedSession.id);
       setActiveTab("summary");
-      setProcessingStatus({ stage: "completed", progress: 100, message: "Everything optimized!" });
+
+      if (completedSession.status === "processing") {
+        setProcessingStatus({ stage: "completed", progress: 100, message: "Audio enviado con éxito a la cola asíncrona!" });
+        pollSessionStatus(completedSession.id, payload.localAudioUrl);
+      } else {
+        setProcessingStatus({ stage: "completed", progress: 100, message: "Everything optimized!" });
+      }
 
       // Clean status after success
       setTimeout(() => {
@@ -909,8 +968,14 @@ This workspace was custom-curated in **⚡ Turbo Fast-Track Mode** to bypass bro
       const newList = [completedSession, ...sessions];
       saveSessions(newList);
       setActiveSessionId(completedSession.id);
-      setActiveTab("summary");
-      setProcessingStatus({ stage: "completed", progress: 100, message: "Workspace companion compiled successfully!" });
+      setActiveTab("transcript");
+
+      if (completedSession.status === "processing") {
+        setProcessingStatus({ stage: "completed", progress: 100, message: "Archivo subido con éxito, procesando en la nube..." });
+        pollSessionStatus(completedSession.id, localAudioUrl);
+      } else {
+        setProcessingStatus({ stage: "completed", progress: 100, message: "Workspace companion compiled successfully!" });
+      }
 
       // Clean status after success
       setTimeout(() => {

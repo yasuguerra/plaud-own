@@ -45,6 +45,8 @@ export interface StudySession {
   templateId?: string;       // Plaud-style summary template ID
   speakerMap?: Record<string, string>; // Maps speaker generic names to real names (e.g. "Speaker 1" -> "Yasu Guerra")
   localAudioUrl?: string;    // Blob URL for local audio playback
+  status?: 'processing' | 'completed' | 'failed'; // Background processing status
+  error?: string;            // Failure reason if status is 'failed'
 }
 
 export interface TopicFolder {
