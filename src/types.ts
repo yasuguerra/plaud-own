@@ -47,6 +47,8 @@ export interface StudySession {
   localAudioUrl?: string;    // Blob URL for local audio playback
   status?: 'processing' | 'completed' | 'failed'; // Background processing status
   error?: string;            // Failure reason if status is 'failed'
+  logs?: Array<{ timestamp: string; stage: string; message: string }>;
+  progress?: number;         // Processing progress percentage (0-100)
 }
 
 export interface TopicFolder {

@@ -1,30 +1,373 @@
 import express from "express";
 import path from "path";
 import fs from "fs";
-import dotenv from "dotenv";
+import os from "os";
+import * as dotenvModule from "dotenv";
+
+const dotenv = dotenvModule && typeof (dotenvModule as any).config === "function"
+  ? dotenvModule
+  : (dotenvModule as any).default && typeof (dotenvModule as any).default.config === "function"
+    ? (dotenvModule as any).default
+    : { config: () => {}, parse: (content: any) => ({}) };
+
 import { GoogleGenAI, Type } from "@google/genai";
 import multer from "multer";
 import { Firestore } from "@google-cloud/firestore";
 import { Storage } from "@google-cloud/storage";
 import { getTemplateById } from "./src/templates";
+import { exec } from "child_process";
+import { promisify } from "util";
+import speech from "@google-cloud/speech";
+
+const execPromise = promisify(exec);
 
 // Explicitly override host environment variables with .env configuration
-dotenv.config();
+try {
+  if (dotenv && typeof (dotenv as any).config === "function") {
+    (dotenv as any).config();
+  }
+} catch (configErr) {
+  console.warn("Safe dotenv.config() bypassed:", configErr);
+}
+
 if (fs.existsSync(".env")) {
   try {
-    const envConfig = dotenv.parse(fs.readFileSync(".env"));
-    for (const k in envConfig) {
-      process.env[k] = envConfig[k];
+    if (dotenv && typeof (dotenv as any).parse === "function") {
+      const envConfig = (dotenv as any).parse(fs.readFileSync(".env"));
+      for (const k in envConfig) {
+        process.env[k] = envConfig[k];
+      }
     }
   } catch (e) {
     console.warn("Failed to manually parse .env", e);
   }
 }
 
-// Initialize Firestore Database connection
-const firestore = new Firestore({
-  projectId: process.env.GOOGLE_CLOUD_PROJECT || "plaud-own",
-});
+// In-Memory Fail-Safe Database Adapter for Firestore
+export class FailSafeFirestore {
+  private useMemory = false;
+  private memoryDb: Record<string, Record<string, any>> = {
+    users: {},
+    sessions: {},
+    folders: {},
+  };
+  private realFirestore: Firestore | null = null;
+
+  constructor() {
+    try {
+      this.realFirestore = new Firestore({
+        projectId: process.env.GOOGLE_CLOUD_PROJECT || "plaud-own",
+      });
+      console.log("[FIRESTORE INIT] Initialized Firestore client.");
+    } catch (e: any) {
+      console.warn("[FIRESTORE INIT FAIL] Real Firestore initialization failed. Falling back to in-memory mode:", e.message || e);
+      this.useMemory = true;
+    }
+  }
+
+  public setMemoryMode(enable: boolean) {
+    this.useMemory = enable;
+  }
+
+  public isMemoryMode(): boolean {
+    return this.useMemory;
+  }
+
+  public clearMemory() {
+    this.memoryDb = {
+      users: {},
+      sessions: {},
+      folders: {},
+    };
+  }
+
+  public collection(name: string) {
+    const self = this;
+    return {
+      doc(id: string) {
+        return {
+          ref: { id, collectionName: name },
+          async get() {
+            if (self.useMemory) {
+              const data = self.memoryDb[name]?.[id];
+              return {
+                exists: data !== undefined,
+                data: () => (data ? JSON.parse(JSON.stringify(data)) : undefined),
+              };
+            }
+            try {
+              const doc = await self.realFirestore!.collection(name).doc(id).get();
+              return doc;
+            } catch (err: any) {
+              console.warn(`[FIRESTORE ERR] collection(${name}).doc(${id}).get() failed. Activating in-memory fallback:`, err.message || err);
+              self.useMemory = true;
+              const data = self.memoryDb[name]?.[id];
+              return {
+                exists: data !== undefined,
+                data: () => (data ? JSON.parse(JSON.stringify(data)) : undefined),
+              };
+            }
+          },
+          async set(data: any, options?: any) {
+            if (self.useMemory) {
+              if (!self.memoryDb[name]) self.memoryDb[name] = {};
+              if (options?.merge && self.memoryDb[name][id]) {
+                self.memoryDb[name][id] = { ...self.memoryDb[name][id], ...data };
+              } else {
+                self.memoryDb[name][id] = { ...data };
+              }
+              return;
+            }
+            try {
+              await self.realFirestore!.collection(name).doc(id).set(data, options);
+            } catch (err: any) {
+              console.warn(`[FIRESTORE ERR] collection(${name}).doc(${id}).set() failed. Activating in-memory fallback:`, err.message || err);
+              self.useMemory = true;
+              if (!self.memoryDb[name]) self.memoryDb[name] = {};
+              if (options?.merge && self.memoryDb[name][id]) {
+                self.memoryDb[name][id] = { ...self.memoryDb[name][id], ...data };
+              } else {
+                self.memoryDb[name][id] = { ...data };
+              }
+            }
+          },
+          async update(data: any) {
+            if (self.useMemory) {
+              if (!self.memoryDb[name]) self.memoryDb[name] = {};
+              self.memoryDb[name][id] = { ...(self.memoryDb[name][id] || {}), ...data };
+              return;
+            }
+            try {
+              await self.realFirestore!.collection(name).doc(id).update(data);
+            } catch (err: any) {
+              console.warn(`[FIRESTORE ERR] collection(${name}).doc(${id}).update() failed. Activating in-memory fallback:`, err.message || err);
+              self.useMemory = true;
+              if (!self.memoryDb[name]) self.memoryDb[name] = {};
+              self.memoryDb[name][id] = { ...(self.memoryDb[name][id] || {}), ...data };
+            }
+          },
+          async delete() {
+            if (self.useMemory) {
+              if (self.memoryDb[name]) {
+                delete self.memoryDb[name][id];
+              }
+              return;
+            }
+            try {
+              await self.realFirestore!.collection(name).doc(id).delete();
+            } catch (err: any) {
+              console.warn(`[FIRESTORE ERR] collection(${name}).doc(${id}).delete() failed. Activating in-memory fallback:`, err.message || err);
+              self.useMemory = true;
+              if (self.memoryDb[name]) {
+                delete self.memoryDb[name][id];
+              }
+            }
+          },
+        };
+      },
+
+      where(field: string, opStr: string, value: any) {
+        return {
+          where(field2: string, opStr2: string, value2: any) {
+            return {
+              async get() {
+                if (self.useMemory) {
+                  const results: any[] = [];
+                  const col = self.memoryDb[name] || {};
+                  for (const key of Object.keys(col)) {
+                    const docVal = col[key];
+                    if (docVal && docVal[field] === value && docVal[field2] === value2) {
+                      results.push({
+                        data: () => JSON.parse(JSON.stringify(docVal)),
+                        ref: { id: key, collectionName: name },
+                      });
+                    }
+                  }
+                  return {
+                    forEach(callback: (doc: any) => void) {
+                      results.forEach(callback);
+                    },
+                    empty: results.length === 0,
+                  };
+                }
+                try {
+                  const snap = await self.realFirestore!.collection(name)
+                    .where(field, opStr as any, value)
+                    .where(field2, opStr2 as any, value2)
+                    .get();
+                  return snap;
+                } catch (err: any) {
+                  console.warn(`[FIRESTORE ERR] collection(${name}).where(${field}, ${opStr}, ${value}).where(${field2}, ${opStr2}, ${value2}).get() failed. Activating in-memory fallback:`, err.message || err);
+                  self.useMemory = true;
+                  const results: any[] = [];
+                  const col = self.memoryDb[name] || {};
+                  for (const key of Object.keys(col)) {
+                    const docVal = col[key];
+                    if (docVal && docVal[field] === value && docVal[field2] === value2) {
+                      results.push({
+                        data: () => JSON.parse(JSON.stringify(docVal)),
+                        ref: { id: key, collectionName: name },
+                      });
+                    }
+                  }
+                  return {
+                    forEach(callback: (doc: any) => void) {
+                      results.forEach(callback);
+                    },
+                    empty: results.length === 0,
+                  };
+                }
+              },
+            };
+          },
+
+          async get() {
+            if (self.useMemory) {
+              const results: any[] = [];
+              const col = self.memoryDb[name] || {};
+              for (const key of Object.keys(col)) {
+                const docVal = col[key];
+                if (docVal && docVal[field] === value) {
+                  results.push({
+                    data: () => JSON.parse(JSON.stringify(docVal)),
+                    ref: { id: key, collectionName: name },
+                  });
+                }
+              }
+              return {
+                forEach(callback: (doc: any) => void) {
+                  results.forEach(callback);
+                },
+                empty: results.length === 0,
+              };
+            }
+            try {
+              const snap = await self.realFirestore!.collection(name).where(field, opStr as any, value).get();
+              return snap;
+            } catch (err: any) {
+              console.warn(`[FIRESTORE ERR] collection(${name}).where(${field}, ${opStr}, ${value}).get() failed. Activating in-memory fallback:`, err.message || err);
+              self.useMemory = true;
+              const results: any[] = [];
+              const col = self.memoryDb[name] || {};
+              for (const key of Object.keys(col)) {
+                const docVal = col[key];
+                if (docVal && docVal[field] === value) {
+                  results.push({
+                    data: () => JSON.parse(JSON.stringify(docVal)),
+                    ref: { id: key, collectionName: name },
+                  });
+                }
+              }
+              return {
+                forEach(callback: (doc: any) => void) {
+                  results.forEach(callback);
+                },
+                empty: results.length === 0,
+              };
+            }
+          },
+        };
+      },
+
+      async get() {
+        if (self.useMemory) {
+          const results: any[] = [];
+          const col = self.memoryDb[name] || {};
+          for (const key of Object.keys(col)) {
+            const docVal = col[key];
+            if (docVal) {
+              results.push({
+                data: () => JSON.parse(JSON.stringify(docVal)),
+                ref: { id: key, collectionName: name },
+              });
+            }
+          }
+          return {
+            forEach(callback: (doc: any) => void) {
+              results.forEach(callback);
+            },
+            empty: results.length === 0,
+          };
+        }
+        try {
+          const snap = await self.realFirestore!.collection(name).get();
+          return snap;
+        } catch (err: any) {
+          console.warn(`[FIRESTORE ERR] collection(${name}).get() failed. Activating in-memory fallback:`, err.message || err);
+          self.useMemory = true;
+          const results: any[] = [];
+          const col = self.memoryDb[name] || {};
+          for (const key of Object.keys(col)) {
+            const docVal = col[key];
+            if (docVal) {
+              results.push({
+                data: () => JSON.parse(JSON.stringify(docVal)),
+                ref: { id: key, collectionName: name },
+              });
+            }
+          }
+          return {
+            forEach(callback: (doc: any) => void) {
+              results.forEach(callback);
+            },
+            empty: results.length === 0,
+          };
+        }
+      },
+    };
+  }
+
+  public batch() {
+    const self = this;
+    const operations: Array<() => Promise<void>> = [];
+    return {
+      update(docRefWrapper: any, data: any) {
+        const { id, collectionName } = docRefWrapper;
+        operations.push(async () => {
+          if (self.useMemory) {
+            if (!self.memoryDb[collectionName]) self.memoryDb[collectionName] = {};
+            self.memoryDb[collectionName][id] = { ...(self.memoryDb[collectionName][id] || {}), ...data };
+            return;
+          }
+          try {
+            await self.realFirestore!.collection(collectionName).doc(id).update(data);
+          } catch (err: any) {
+            console.warn(`[FIRESTORE BATCH ERR] update doc ${id} failed. Activating in-memory fallback:`, err.message || err);
+            self.useMemory = true;
+            if (!self.memoryDb[collectionName]) self.memoryDb[collectionName] = {};
+            self.memoryDb[collectionName][id] = { ...(self.memoryDb[collectionName][id] || {}), ...data };
+          }
+        });
+      },
+      async commit() {
+        for (const op of operations) {
+          await op();
+        }
+      },
+    };
+  }
+}
+
+// Initialize Fail-Safe Firestore Database connection wrapper
+const firestore = new FailSafeFirestore();
+
+// Helper to log operations and update progress for a session
+async function logToSession(sessionId: string, stage: string, message: string, progress: number) {
+  const timestamp = new Date().toISOString();
+  console.log(`[SESSION LOG][${sessionId}][${stage}] (${progress}%): ${message}`);
+  try {
+    const docRef = firestore.collection("sessions").doc(sessionId);
+    const doc = await docRef.get();
+    if (doc.exists) {
+      const data = doc.data();
+      const logs = data?.logs || [];
+      logs.push({ timestamp, stage, message });
+      await docRef.update({ logs, progress });
+    }
+  } catch (err: any) {
+    console.error(`[SESSION LOG ERROR] Failed to write log for session ${sessionId}:`, err.message || err);
+  }
+}
 
 // Initialize Cloud Storage connection
 const storage = new Storage({
@@ -76,6 +419,175 @@ async function uploadToGCS(filePath: string, destination: string, mimeType: stri
   }
 }
 
+async function transcodeToWav(inputPath: string, outputPath: string): Promise<boolean> {
+  console.log(`[TRANSCODE] Attempting to transcode "${inputPath}" to "${outputPath}"...`);
+  // Flags: -y to overwrite, -threads 0 for multi-threaded CPU processing, -i input, -acodec pcm_s16le (16-bit linear PCM), -ac 1 (mono), -ar 16000 (16000 Hz)
+  const command = `ffmpeg -y -threads 0 -i "${inputPath}" -acodec pcm_s16le -ac 1 -ar 16000 "${outputPath}"`;
+  try {
+    const { stdout, stderr } = await execPromise(command);
+    console.log(`[TRANSCODE] FFMPEG Success. stdout: ${stdout || "none"}`);
+    return true;
+  } catch (err: any) {
+    console.error(`[TRANSCODE ERROR] FFMPEG failed to transcode. Error:`, err.message || err);
+    return false;
+  }
+}
+
+export function formatTime(seconds: number): string {
+  const h = Math.floor(seconds / 3600);
+  const m = Math.floor((seconds % 3600) / 60);
+  const s = Math.floor(seconds % 60);
+  const pad = (num: number) => num.toString().padStart(2, "0");
+  return `[${pad(h)}:${pad(m)}:${pad(s)}]`;
+}
+
+async function transcribeAudioWithChirp2(
+  gcsUri: string,
+  mimeType: string,
+  transcodedSuccessfully: boolean
+): Promise<string> {
+  const projectId = process.env.GOOGLE_CLOUD_PROJECT || "plaud-own";
+  console.log(`[STT V1] Initializing SpeechClient for project ${projectId}...`);
+
+  const speechClient = new speech.SpeechClient({
+    projectId: projectId
+  });
+
+  let encoding = "LINEAR16";
+  let sampleRateHertz = 16000;
+
+  if (!transcodedSuccessfully && mimeType) {
+    const mimeLower = mimeType.toLowerCase();
+    if (mimeLower.includes("ogg")) {
+      encoding = "OGG_OPUS";
+      sampleRateHertz = 48000;
+      console.log(`[STT V1] Transcoding skipped/failed for OGG. Using native OGG_OPUS encoding config at 48kHz.`);
+    } else if (mimeLower.includes("mp3") || mimeLower.includes("mpeg")) {
+      encoding = "MP3";
+      sampleRateHertz = 16000;
+      console.log(`[STT V1] Transcoding skipped/failed for MP3. Using native MP3 encoding config.`);
+    }
+  }
+
+  const request = {
+    config: {
+      encoding: encoding,
+      sampleRateHertz: sampleRateHertz,
+      languageCode: "es-ES",
+      model: "default",  // "default" supports es-ES in all regions; "latest_long" does NOT
+      enableSpeakerDiarization: true,
+      diarizationConfig: {
+        enableSpeakerDiarization: true,
+        minSpeakerCount: 2,
+        maxSpeakerCount: 8
+      }
+    },
+    audio: {
+      uri: gcsUri
+    }
+  };
+
+  try {
+    console.log(`[STT V1] Running longRunningRecognize on ${gcsUri}...`);
+    const [operation] = await speechClient.longRunningRecognize(request as any);
+    console.log(`[STT V1] Operation started: ${operation.name}. Waiting for completion...`);
+    const [response] = await operation.promise();
+    console.log(`[STT V1] Operation completed.`);
+
+    if (!response.results || response.results.length === 0) {
+      console.warn(`[STT V1] No results returned from Speech-to-Text.`);
+      return "[00:00:00] Speaker 1: (No speech detected)";
+    }
+
+    const parseDuration = (val: any): number => {
+      if (!val) return 0;
+      if (typeof val === "string") {
+        return parseFloat(val.replace("s", ""));
+      }
+      const seconds = Number(val.seconds || 0);
+      const nanos = Number(val.nanos || 0);
+      return seconds + nanos / 1e9;
+    };
+
+    // For Speech-to-Text V1 diarization, the last result's alternative contains
+    // the complete list of all words with speaker tags from the entire audio.
+    const lastResult = response.results[response.results.length - 1];
+    const lastAlternative = lastResult?.alternatives?.[0];
+    let words = lastAlternative?.words || [];
+
+    const hasSpeakerTags = words.some((w: any) => w.speakerTag);
+
+    if (words.length === 0 || !hasSpeakerTags) {
+      console.log("[STT V1] Last result words array is empty or lacks speaker tags. Falling back to gathering from all results.");
+      words = [];
+      for (const result of response.results) {
+        const alternative = result.alternatives?.[0];
+        if (alternative && alternative.words) {
+          for (const wordObj of alternative.words) {
+            words.push(wordObj);
+          }
+        }
+      }
+    } else {
+      console.log(`[STT V1] Successfully extracted ${words.length} diarized words from the final result payload.`);
+    }
+
+    if (words.length === 0) {
+      console.warn(`[STT V1] No words with speaker tags found.`);
+      return "[00:00:00] Speaker 1: (No speech detected)";
+    }
+
+    let currentSegment: { speaker: string; startTime: number; endTime: number; words: string[] } | null = null;
+    const segments: Array<{ speaker: string; startTime: number; endTime: number; text: string }> = [];
+
+    for (const wordObj of words) {
+      const wordText = wordObj.word || "";
+      const speaker = String(wordObj.speakerTag || "1");
+      const startTime = parseDuration(wordObj.startTime);
+      const endTime = parseDuration(wordObj.endTime);
+
+      if (!currentSegment) {
+        currentSegment = { speaker, startTime, endTime, words: [wordText] };
+      } else if (currentSegment.speaker === speaker && (startTime - currentSegment.endTime) < 2.0) {
+        currentSegment.words.push(wordText);
+        currentSegment.endTime = endTime;
+      } else {
+        segments.push({
+          speaker: currentSegment.speaker,
+          startTime: currentSegment.startTime,
+          endTime: currentSegment.endTime,
+          text: currentSegment.words.join(" ")
+        });
+        currentSegment = { speaker, startTime, endTime, words: [wordText] };
+      }
+    }
+
+    if (currentSegment) {
+      segments.push({
+        speaker: currentSegment.speaker,
+        startTime: currentSegment.startTime,
+        endTime: currentSegment.endTime,
+        text: currentSegment.words.join(" ")
+      });
+    }
+
+    if (segments.length === 0) {
+      return "[00:00:00] Speaker 1: (No diarized text segments found)";
+    }
+
+    const formattedTranscript = segments.map(seg => {
+      return `${formatTime(seg.startTime)} Speaker ${seg.speaker}: ${seg.text}`;
+    }).join("\n");
+
+    console.log(`[STT V1] Formatted transcript successfully. Length: ${formattedTranscript.length} characters.`);
+    return formattedTranscript;
+
+  } catch (err: any) {
+    console.error(`[STT V1 ERROR] Speech-to-Text failed:`, err.message || err);
+    throw new Error(`Speech-to-Text transcription failed: ${err.message}`);
+  }
+}
+
 async function getUserSpeakerContext(userId: string): Promise<string> {
   if (!userId || userId === "guest") return "";
   try {
@@ -94,6 +606,376 @@ async function getUserSpeakerContext(userId: string): Promise<string> {
     console.error("Failed to read user speaker context from Firestore:", err);
   }
   return "";
+}
+
+async function executeAudioProcessing(
+  localFilePath: string,
+  mimeType: string,
+  fileName: string,
+  mediaType: string,
+  selectedTemplate: any,
+  speakerContext: string,
+  userId: string,
+  sessionId: string,
+  processingMode?: string
+): Promise<{ parsedStudySession: any; finalTranscript: string; gcsUri: string; geminiFileUri: string }> {
+  const tempWavPath = path.join("/tmp", `${sessionId}_transcoded.wav`);
+  let transcodedSuccessfully = false;
+  let gcsUri = "";
+  let geminiFileUri = "";
+  let finalTranscript = "";
+  let processedFilePath = localFilePath;
+  const isTurbo = processingMode === "turbo";
+
+  try {
+    // 1. Check if we need transcoding (skipped entirely in Turbo Mode)
+    const isAudioOrVideo = mimeType.startsWith("audio/") || mimeType.startsWith("video/") || mimeType.includes("ogg") || mimeType.includes("webm") || mimeType.includes("mp4") || mimeType.includes("mpeg") || mimeType.includes("m4a") || mimeType.includes("wav");
+
+    if (isAudioOrVideo && !isTurbo) {
+      // Transcode using ffmpeg
+      await logToSession(sessionId, "TRANSCODE", "Iniciando transcodificación de formato con FFMPEG...", 10);
+      const ok = await transcodeToWav(localFilePath, tempWavPath);
+      if (ok) {
+        processedFilePath = tempWavPath;
+        transcodedSuccessfully = true;
+        await logToSession(sessionId, "TRANSCODE", "Transcodificación completada a formato PCM lineal de 16kHz mono WAV.", 20);
+      } else {
+        console.warn("[PIPELINE WARNING] Transcoding failed. Falling back to raw file.");
+        await logToSession(sessionId, "TRANSCODE", "FFMPEG no disponible en el host. Omitiendo transcodificación y procediendo con el archivo original.", 20);
+      }
+    } else if (isAudioOrVideo && isTurbo) {
+      await logToSession(sessionId, "TRANSCODE", "Modo Turbo activado: se omitió el paso de transcodificación de audio.", 20);
+    }
+
+    // 2. Upload to GCS or Gemini Files API
+    const uploadMime = transcodedSuccessfully ? "audio/wav" : mimeType;
+    const uploadName = transcodedSuccessfully ? `${path.basename(fileName, path.extname(fileName))}.wav` : fileName;
+    const gcsDestination = `audios/${sessionId}_${uploadName}`;
+
+    try {
+      await logToSession(sessionId, "UPLOAD", "Subiendo archivo de audio a almacenamiento en la nube (GCS)...", 30);
+      gcsUri = await uploadToGCS(processedFilePath, gcsDestination, uploadMime);
+      if (gcsUri) {
+        await logToSession(sessionId, "UPLOAD", `Subida en la nube completada con éxito.`, 40);
+      } else {
+        await logToSession(sessionId, "UPLOAD", "La subida directa a GCS falló, preparando fallback asíncrono.", 40);
+      }
+    } catch (gcsErr: any) {
+      console.warn("[PIPELINE GCS WARNING] GCS upload failed, falling back to Gemini Files API:", gcsErr);
+      await logToSession(sessionId, "UPLOAD", "La subida directa a GCS falló, utilizando fallback asíncrono.", 40);
+    }
+
+    const ai = getGeminiClient();
+
+    // 3. Transcription Phase (Speech-to-Text Chirp 2) - skipped in Turbo Mode
+    let sttSuccess = false;
+    if (gcsUri && !isTurbo) {
+      try {
+        await logToSession(sessionId, "STT_API", "Iniciando transcripción por oradores con Google Speech-to-Text V1...", 50);
+        finalTranscript = await transcribeAudioWithChirp2(gcsUri, mimeType, transcodedSuccessfully);
+        sttSuccess = true;
+        await logToSession(sessionId, "STT_API", `Transcripción dedicada completada con éxito.`, 70);
+      } catch (sttErr: any) {
+        console.error("[PIPELINE STT ERROR] Speech-to-Text failed, falling back to single-pass Gemini:", sttErr);
+        await logToSession(sessionId, "STT_API", "La transcripción dedicada falló o no está configurada, utilizando fallback de Gemini.", 70);
+      }
+    }
+
+    // 4. Gemini structured synthesis
+    let parsedStudySession: any = null;
+
+    if (sttSuccess) {
+      // Stage 1 Schema configuration
+      const stage1Schema = JSON.parse(JSON.stringify(summaryResponseSchema));
+      stage1Schema.properties.summary.description = `A beautifully detailed markdown executive summary structured strictly following the layout, headers, blockquotes, and lists of this template:\n${selectedTemplate.prompt}`;
+
+      // Stage 1 Prompt
+      const stage1Prompt = `You are a world-class professional summary editor. 
+We have transcribed a meeting audio file: "${fileName}". Below is the official speaker-diarized transcript:
+
+=== OFFICIAL DIARIZED TRANSCRIPT ===
+${finalTranscript}
+=== END TRANSCRIPT ===
+
+Based on this transcript, generate:
+1. An academic and professional title for this meeting (max 6 words).
+2. A beautiful, highly detailed study summary in formatted Markdown following strictly the layout guidelines of this template: "${selectedTemplate.name}".
+3. Resolve the generic speaker labels in the transcript (e.g. '1', '2') to real participant names based on self-introductions, context, or the provided user workspace details, and populate the "speakerMappings" key with this mapping.
+
+Generate fully populated results in JSON format according to the summaryResponseSchema.${speakerContext}
+
+CRITICAL LANGUAGE REQUIREMENT: All output text (including title and summary) MUST be strictly in the detected language of the source transcript. If the transcript is in Spanish, the entire JSON output MUST be in Spanish. DO NOT respond in English if the source is in Spanish.`;
+
+      console.log("[PIPELINE STAGE 1] Querying Gemini for summary and speaker mapping...");
+      await logToSession(sessionId, "STAGE_1", "Generando resumen estructurado y mapeo de oradores reales con Gemini 2.5 Flash...", 80);
+      const stage1Response = await generateWithFallback({
+        model: "gemini-2.5-flash",
+        contents: [{ text: stage1Prompt }],
+        config: {
+          responseMimeType: "application/json",
+          responseSchema: stage1Schema,
+          temperature: 0.2,
+          maxOutputTokens: 8192
+        }
+      });
+
+      const stage1Text = stage1Response.text;
+      if (!stage1Text) throw new Error("Stage 1 summary generation returned empty response.");
+
+      const stage1Result = JSON.parse(stage1Text.trim());
+      const title = stage1Result.title;
+      const summary = stage1Result.summary;
+      
+      // Build a standard speakerMap dictionary from speakerMappings array
+      const speakerMap: Record<string, string> = {};
+      if (stage1Result.speakerMappings && Array.isArray(stage1Result.speakerMappings)) {
+        for (const mapping of stage1Result.speakerMappings) {
+          if (mapping.speakerTag && mapping.realName) {
+            speakerMap[mapping.speakerTag] = mapping.realName;
+          }
+        }
+      }
+
+      // Apply speaker re-labeling to finalTranscript
+      if (Object.keys(speakerMap).length > 0) {
+        console.log("[PIPELINE STAGE 1] Applying speaker mapping:", speakerMap);
+        for (const [key, name] of Object.entries(speakerMap)) {
+          if (name && typeof name === "string") {
+            const escapedKey = key.replace(/[-\/\\^$*+?.()|[\]{}]/g, '\\$&');
+            const regex = new RegExp(`Speaker ${escapedKey}:`, "g");
+            finalTranscript = finalTranscript.replace(regex, `${name}:`);
+          }
+        }
+      }
+
+      // Stage 2: Generate Action Items, Mind Map, and Flashcards based on Stage 1 summary and speaker-mapped transcript!
+      const stage2Prompt = `You are an educational designer and conceptual illustrator. 
+Based on the following speaker-mapped meeting transcript and its executive summary:
+
+=== MEETING SUMMARY ===
+${summary}
+=== END SUMMARY ===
+
+=== SPEAKER-MAPPED TRANSCRIPT ===
+${finalTranscript}
+=== END TRANSCRIPT ===
+
+Generate the complete interactive study assets according to the assetsResponseSchema:
+1. Structured follow-up Action Items with importance levels (high/medium/low).
+2. A highly descriptive Mind Map concept hierarchy matching the MindMapNode schema structure for canvas visualization.
+3. Five to seven highly engaging study flashcards testing the main agreements or concepts.
+
+Generate fully populated results in JSON format according to the assetsResponseSchema.
+
+CRITICAL LANGUAGE REQUIREMENT: All generated asset text fields (actionItems, mindMap labels/details, and flashcards) MUST be strictly in the detected language of the source summary/transcript. If the summary/transcript is in Spanish, the entire JSON output MUST be in Spanish. DO NOT respond in English if the source is in Spanish.`;
+
+      console.log("[PIPELINE STAGE 2] Querying Gemini for interactive study assets (Action Items, Mind Map, Flashcards)...");
+      await logToSession(sessionId, "STAGE_2", "Generando plan de acción, mapa mental y tarjetas de memoria con Gemini...", 90);
+      const stage2Response = await generateWithFallback({
+        model: "gemini-2.5-flash",
+        contents: [{ text: stage2Prompt }],
+        config: {
+          responseMimeType: "application/json",
+          responseSchema: assetsResponseSchema,
+          temperature: 0.2,
+          maxOutputTokens: 8192
+        }
+      });
+
+      const stage2Text = stage2Response.text;
+      if (!stage2Text) throw new Error("Stage 2 assets generation returned empty response.");
+
+      const stage2Result = JSON.parse(stage2Text.trim());
+
+      // Assemble consolidated parsedStudySession
+      parsedStudySession = {
+        title,
+        summary,
+        actionItems: stage2Result.actionItems || [],
+        mindMap: stage2Result.mindMap || { id: "root", label: "Empty", details: "", children: [] },
+        flashcards: stage2Result.flashcards || []
+      };
+
+    } else {
+      // Fallback single-pass behavior (used for local developer mode, or if GCS/STT fails in production)
+      console.log("[PIPELINE FALLBACK] Running single-pass Gemini media analysis...");
+      await logToSession(sessionId, "STAGE_1", "Iniciando análisis multimedia de una sola pasada con Gemini 2.5 Flash...", 80);
+      // The Gemini Developer API (API key) cannot read gs:// URIs — only Vertex AI (ADC) can.
+      // If in Developer API mode, always upload the local file to Gemini Files API regardless of whether
+      // a GCS URI exists. If using Vertex AI ADC, the gs:// URI works directly.
+      let fallbackFileUri = geminiFileUri;
+      if (!fallbackFileUri) {
+        if (isDeveloperApiMode()) {
+          console.log("[PIPELINE FALLBACK] Developer API mode: uploading local WAV to Gemini Files API (gs:// URIs not supported)...");
+          await logToSession(sessionId, "UPLOAD", "Cargando archivo a la API de Archivos de Gemini...", 82);
+          try {
+            const fileRef = await ai.files.upload({
+              file: processedFilePath,
+              config: {
+                mimeType: uploadMime,
+                displayName: uploadName,
+              }
+            });
+            fallbackFileUri = fileRef.uri || "";
+            geminiFileUri = fallbackFileUri;
+            console.log(`[PIPELINE FALLBACK] Gemini Files upload successful: ${fallbackFileUri}`);
+            await logToSession(sessionId, "UPLOAD", "Carga en la API de Archivos completada con éxito.", 85);
+          } catch (uploadErr) {
+            console.error("[PIPELINE FALLBACK] Failed to upload file to Gemini Files API, will fallback to inlineData:", uploadErr);
+            await logToSession(sessionId, "UPLOAD", "La carga en la API de Archivos falló, usando fallback de inlineData en Base64.", 85);
+          }
+        } else {
+          // Vertex AI (ADC) can read gs:// URIs natively
+          fallbackFileUri = gcsUri;
+          console.log(`[PIPELINE FALLBACK] Vertex AI ADC mode: using GCS URI directly: ${fallbackFileUri}`);
+          await logToSession(sessionId, "UPLOAD", "Modo Vertex AI: utilizando URI de GCS directamente.", 85);
+        }
+      }
+
+      const contentPromptText = `You are an advanced multimedia processor. Carefully analyze this uploaded media file: "${fileName}".
+      Reconstruct the exact narrative flow as the transcript, timestamping key or speaker changes. Then compile a high-fidelity study suite.
+      
+      Generate fully populated and valid results in JSON format according to the supplied responseSchema:
+      1. An academic and professional title.
+      2. A beautiful detailed summary/resume in formatted Markdown based on the template layout: "${selectedTemplate.name}".
+      3. A complete timestamped narrative transcript or detailed chapter layout.
+      4. Structured follow-up Action Items.
+      5. A highly descriptive Mind Map concept hierarchy matching the MindMapNode schema structure.
+      6. Five to seven highly engaging study flashcards testing main concept outcomes.
+      
+      Generate fully populated and valid results in JSON format according to the supplied responseSchema.${speakerContext}
+      
+      CRITICAL LANGUAGE REQUIREMENT: All generated text fields (title, summary, transcript, actionItems, mindMap, flashcards) MUST be strictly in the detected language of the source media. If the spoken language is Spanish, the entire JSON output MUST be in Spanish. DO NOT respond in English if the source is in Spanish.`;
+
+      const contentsPayload: any[] = [];
+      if (fallbackFileUri) {
+        contentsPayload.push({
+          fileData: {
+            fileUri: fallbackFileUri,
+            mimeType: uploadMime,
+          }
+        });
+      } else {
+        // Absolute fallback: read local file and send as base64 inlineData (supported up to 20MB)
+        const fileStats = fs.existsSync(processedFilePath) ? fs.statSync(processedFilePath) : null;
+        if (fileStats && fileStats.size < 20 * 1024 * 1024) {
+          console.log(`[PIPELINE FALLBACK] Using Base64 inlineData fallback (File size: ${Math.round(fileStats.size / 1024 / 1024)}MB)...`);
+          await logToSession(sessionId, "STAGE_1", "Leyendo archivo local para enviar inlineData Base64...", 88);
+          const base64Content = fs.readFileSync(processedFilePath).toString("base64");
+          contentsPayload.push({
+            inlineData: {
+              mimeType: uploadMime,
+              data: base64Content
+            }
+          });
+          await logToSession(sessionId, "STAGE_1", "Archivo cargado en memoria listo para enviar.", 91);
+        } else {
+          throw new Error("No media file URI was available, and the local file was too large or missing to send as inlineData.");
+        }
+      }
+
+      contentsPayload.push({
+        text: contentPromptText
+      });
+
+      await logToSession(sessionId, "STAGE_2", "Sintetizando informe completo en una sola pasada con Gemini 2.5 Flash...", 94);
+      const response = await generateWithFallback({
+        model: "gemini-2.5-flash",
+        contents: contentsPayload,
+        config: {
+          responseMimeType: "application/json",
+          responseSchema: studyResponseSchema,
+          temperature: 0.2,
+          maxOutputTokens: 8192
+        }
+      });
+
+      const parsedText = response.text;
+      if (!parsedText) throw new Error("No response output text was generated by Gemini.");
+
+      parsedStudySession = JSON.parse(parsedText.trim());
+      finalTranscript = parsedStudySession.transcript;
+    }
+
+    return { parsedStudySession, finalTranscript, gcsUri, geminiFileUri };
+
+  } finally {
+    // Cleanup temp files
+    try {
+      if (fs.existsSync(localFilePath)) {
+        fs.unlinkSync(localFilePath);
+        console.log(`[PIPELINE] Cleaned up original temp file: ${localFilePath}`);
+      }
+    } catch (cleanupErr) {
+      console.error("[PIPELINE] Failed to clean up original temp file:", cleanupErr);
+    }
+
+    try {
+      if (fs.existsSync(tempWavPath)) {
+        fs.unlinkSync(tempWavPath);
+        console.log(`[PIPELINE] Cleaned up transcoded WAV temp file: ${tempWavPath}`);
+      }
+    } catch (cleanupErr) {
+      console.error("[PIPELINE] Failed to clean up transcoded WAV temp file:", cleanupErr);
+    }
+  }
+}
+
+async function processAudioPipeline(
+  localFilePath: string,
+  mimeType: string,
+  fileName: string,
+  mediaType: string,
+  selectedTemplate: any,
+  speakerContext: string,
+  userId: string,
+  sessionId: string,
+  initialSession: any,
+  processingMode?: string
+): Promise<void> {
+  try {
+    await logToSession(sessionId, "START", "Comenzando procesamiento asíncrono de audio de fondo...", 5);
+    const { parsedStudySession, finalTranscript, gcsUri, geminiFileUri } = await executeAudioProcessing(
+      localFilePath,
+      mimeType,
+      fileName,
+      mediaType,
+      selectedTemplate,
+      speakerContext,
+      userId,
+      sessionId,
+      processingMode
+    );
+
+    const completedSession = {
+      ...initialSession,
+      ...parsedStudySession,
+      transcript: finalTranscript,
+      status: "completed",
+      gcsUri: gcsUri || geminiFileUri,
+      chatHistory: [
+        {
+          id: "welcome_msg",
+          role: "model" as const,
+          content: `¡Listo! He analizado tu archivo **"${fileName}"** y he sintetizado "${parsedStudySession.title}" siguiendo la plantilla de formato elegida.`,
+          timestamp: new Date().toISOString()
+        }
+      ]
+    };
+
+    await logToSession(sessionId, "FINAL", "Guardando resultados finales del informe en la base de datos...", 98);
+    await firestore.collection("sessions").doc(sessionId).set(completedSession);
+    await logToSession(sessionId, "COMPLETED", "¡Procesamiento asíncrono y síntesis de materiales completados con éxito!", 100);
+    console.log(`[PIPELINE] Successfully completed and stored session ${sessionId}`);
+  } catch (err: any) {
+    console.error(`[PIPELINE ERROR] Pipeline for session ${sessionId} failed:`, err);
+    await logToSession(sessionId, "FAILED", `Falla en el procesamiento: ${err.message || err}`, 100);
+    await firestore.collection("sessions").doc(sessionId).update({
+      status: "failed",
+      summary: `### ❌ Falla en el análisis de materiales\nEl procesamiento de fondo para tu archivo encontró un obstáculo:\n${err.message || err}`,
+      error: err.message || "An unexpected error occurred during processing."
+    });
+  }
 }
 
 const app = express();
@@ -269,7 +1151,7 @@ function cleanErrorMessage(error: any): string {
   return classifyError(error).message;
 }
 
-function getExtensionFromMimeType(mimeType: string, defaultExt: string = "audio"): string {
+export function getExtensionFromMimeType(mimeType: string, defaultExt: string = "audio"): string {
   if (!mimeType) return defaultExt;
   const m = mimeType.toLowerCase();
   if (m.includes("audio/webm") || m.includes("webm")) return "webm";
@@ -746,6 +1628,100 @@ const studyResponseSchema = {
   required: ["title", "summary", "transcript", "actionItems", "mindMap", "flashcards"]
 };
 
+// Define Stage 1 Schema for Summary Generation
+const summaryResponseSchema = {
+  type: Type.OBJECT,
+  properties: {
+    title: { 
+      type: Type.STRING, 
+      description: "A concise, academic, highly descriptive title for this lecture or material (max 6 words)." 
+    },
+    summary: { 
+      type: Type.STRING, 
+      description: "A detailed, beautiful markdown-formatted study summary and resume of the material. Must be high-density, well-paddled structure using bullets, major sections, and takeaways." 
+    },
+    speakerMappings: {
+      type: Type.ARRAY,
+      description: "List of resolved speaker names based on context.",
+      items: {
+        type: Type.OBJECT,
+        properties: {
+          speakerTag: { type: Type.STRING, description: "The generic speaker label, e.g., '1', '2'" },
+          realName: { type: Type.STRING, description: "The resolved real name of the participant" }
+        },
+        required: ["speakerTag", "realName"]
+      }
+    }
+  },
+  required: ["title", "summary", "speakerMappings"]
+};
+
+// Define Stage 2 Schema for Asset Generation
+const assetsResponseSchema = {
+  type: Type.OBJECT,
+  properties: {
+    actionItems: {
+      type: Type.ARRAY,
+      items: {
+        type: Type.OBJECT,
+        properties: {
+          task: { type: Type.STRING, description: "A highly actionable take-home item or follow-up exercise from this material." },
+          importance: { type: Type.STRING, enum: ["high", "medium", "low"], description: "The priority of this educational milestone." }
+        },
+        required: ["task", "importance"]
+      }
+    },
+    mindMap: {
+      type: Type.OBJECT,
+      description: "A nested hierarchical concept study map node structure for canvas visualization.",
+      properties: {
+        id: { type: Type.STRING, description: "Unique string ID (e.g., 'root')" },
+        label: { type: Type.STRING, description: "Core topic label (1-3 words, e.g. 'Web Dev Principles')" },
+        details: { type: Type.STRING, description: "Brief explanatory subtitle" },
+        color: { type: Type.STRING, description: "Hex CSS color string of choice" },
+        children: {
+          type: Type.ARRAY,
+          items: {
+            type: Type.OBJECT,
+            properties: {
+              id: { type: Type.STRING, description: "Sub-topic ID (e.g. 'topic-1')" },
+              label: { type: Type.STRING, description: "Sub-topic label" },
+              details: { type: Type.STRING, description: "Sub-topic subtitle explain" },
+              children: {
+                type: Type.ARRAY,
+                items: {
+                  type: Type.OBJECT,
+                  properties: {
+                    id: { type: Type.STRING, description: "Detailed leaf ID" },
+                    label: { type: Type.STRING, description: "Specific definition/concept" },
+                    details: { type: Type.STRING, description: "Core concise definition takeaway" }
+                  },
+                  required: ["id", "label", "details"]
+                }
+              }
+            },
+            required: ["id", "label", "details", "children"]
+          }
+        }
+      },
+      required: ["id", "label", "details", "color", "children"]
+    },
+    flashcards: {
+      type: Type.ARRAY,
+      items: {
+        type: Type.OBJECT,
+        properties: {
+          question: { type: Type.STRING, description: "A high-quality study question testing memory recall." },
+          answer: { type: Type.STRING, description: "Clear, perfect explanation answer." }
+        },
+        required: ["question", "answer"]
+      },
+      description: "Provide exactly 5 to 7 high-impact study flashcards testing main lessons."
+    }
+  },
+  required: ["actionItems", "mindMap", "flashcards"]
+};
+
 // 3. Process endpoint: transcribes and generates everything (markdown resume, action items, mental map, flashcards)
 app.post("/api/process", async (req, res) => {
   try {
@@ -857,6 +1833,49 @@ app.post("/api/process", async (req, res) => {
         Make sure the mindMap structure is complete, featuring colorful, helpful levels of root topic, sub-topic, and subtopic children details.`
       }];
 
+      console.log("[SAMPLE PROCESS] Generating study companion from Gemini for topic:", topicTitle);
+      const response = await generateWithFallback({
+        model: "gemini-2.5-flash",
+        contents: contentsPayload,
+        config: {
+          responseMimeType: "application/json",
+          responseSchema: currentResponseSchema,
+          temperature: 0.2,
+          maxOutputTokens: 8192
+        }
+      });
+
+      const parsedText = response.text;
+      if (!parsedText) throw new Error("No response output text was generated by Gemini.");
+
+      const parsedStudySession = JSON.parse(parsedText.trim());
+      const sessionId = "sess_" + Date.now().toString(36);
+
+      const completedSession = {
+        id: sessionId,
+        userId: userId,
+        title: parsedStudySession.title || topicTitle,
+        createdAt: new Date().toISOString(),
+        mediaType: mediaType || 'audio',
+        mediaName: mediaName || "mecanica_audio",
+        ...parsedStudySession,
+        status: "completed",
+        chatHistory: [
+          {
+            id: "welcome_msg",
+            role: "model" as const,
+            content: `¡Listo! He analizado tu escrito/transcripción de **"${topicTitle}"** y he sintetizado "${parsedStudySession.title}" de acuerdo con la plantilla elegida.`,
+            timestamp: new Date().toISOString()
+          }
+        ]
+      };
+
+      console.log(`[SAMPLE PROCESS] Saving completed sample session: ${sessionId}`);
+      await firestore.collection("sessions").doc(sessionId).set(completedSession);
+
+      res.status(200).json(completedSession);
+      return;
+
     } else {
       // Real mic recording upload: Run asynchronously in background!
       if (!base64Data || !mimeType) {
@@ -900,66 +1919,21 @@ app.post("/api/process", async (req, res) => {
 
       // Trigger background worker
       (async () => {
+        const ext = getExtensionFromMimeType(cleanMime, "webm");
+        const tempFilePath = path.join("/tmp", `${sessionId}_mic.${ext}`);
         try {
-          const contentPromptText = `You are an advanced multimedia processor. Carefully analyze this uploaded ${mediaType || 'lecture media'} file: "${mediaName || 'Lecture Recording'}".
-          Please listen to the audio carefully and transcribe or reconstruct the exact narrative flow as the transcript, timestamping key changes.
-          Then, generate a comprehensive study session including:
-          1. An academic and professional title.
-          2. A beautiful detailed summary/resume in formatted Markdown based on the template layout: "${selectedTemplate.name}".
-          3. A complete timestamped narrative transcript or detailed chapter layout.
-          4. Structured follow-up Action Items.
-          5. A highly descriptive Mind Map concept hierarchy matching the MindMapNode schema structure.
-          6. Five to seven highly engaging study flashcards testing main concept outcomes.
-          
-          Generate fully populated and valid results in JSON format according to the supplied responseSchema.${speakerContext}
-          
-          CRITICAL REQUIREMENT: You MUST automatically detect the language spoken or written in the source audio/video/document (e.g. Spanish, English). All generated text fields (title, summary, transcript, actionItems, mindMap, flashcards) MUST be entirely in that detected language. Do not translate the content; write it fully in the detected language (for example, if the input is in Spanish, everything must be in Spanish).`;
-
-          const inlinePayload = [
-            {
-              inlineData: {
-                data: base64Data,
-                mimeType: cleanMime,
-              }
-            },
-            {
-              text: contentPromptText
-            }
-          ];
-
-          console.log(`[ASYNC PROCESS BG] Triggering Gemini API generation for ${sessionId}...`);
-          const response = await generateWithFallback({
-            model: "gemini-2.5-flash",
-            contents: inlinePayload,
-            config: {
-              responseMimeType: "application/json",
-              responseSchema: currentResponseSchema,
-              temperature: 0.2
-            }
-          });
-
-          const parsedText = response.text;
-          if (!parsedText) throw new Error("No response generated by Gemini in background.");
-
-          const parsedStudySession = JSON.parse(parsedText.trim());
-
-          const completedSession = {
-            ...initialSession,
-            ...parsedStudySession,
-            status: "completed",
-            chatHistory: [
-              {
-                id: "welcome_msg",
-                role: "model" as const,
-                content: `¡Listo! He analizado tu grabación de reunión **"${mediaName}"** y he sintetizado "${parsedStudySession.title}" siguiendo la plantilla de formato elegida.`,
-                timestamp: new Date().toISOString()
-              }
-            ]
-          };
-
-          await firestore.collection("sessions").doc(sessionId).set(completedSession);
-          console.log(`[ASYNC PROCESS BG] Successfully completed and stored session ${sessionId}`);
-
+          fs.writeFileSync(tempFilePath, Buffer.from(base64Data, "base64"));
+          await processAudioPipeline(
+            tempFilePath,
+            cleanMime,
+            mediaName || `Recording_${sessionId}.${ext}`,
+            mediaType || "audio",
+            selectedTemplate,
+            speakerContext,
+            userId,
+            sessionId,
+            initialSession
+          );
         } catch (bgErr: any) {
           console.error(`[ASYNC PROCESS BG ERROR] Session ${sessionId} failed:`, bgErr);
           await firestore.collection("sessions").doc(sessionId).update({
@@ -967,6 +1941,13 @@ app.post("/api/process", async (req, res) => {
             summary: `### ❌ Falla en el análisis de materiales\nEl procesamiento de fondo para tu archivo encontró un obstáculo:\n${bgErr.message || bgErr}`,
             error: bgErr.message || "An unexpected error occurred."
           });
+          try {
+            if (fs.existsSync(tempFilePath)) {
+              fs.unlinkSync(tempFilePath);
+            }
+          } catch (cleanupErr) {
+            console.error("Failed to delete temp file:", cleanupErr);
+          }
         }
       })();
       return;
@@ -1018,7 +1999,7 @@ app.post("/api/upload-file", upload.single("file"), async (req, res) => {
       return;
     }
 
-    const { mediaType, templateId } = req.body;
+    const { mediaType, templateId, processingMode } = req.body;
     const mediaName = file.originalname || "Uploaded Material";
     const mimeType = file.mimetype || "";
     const tempFilePath = file.path;
@@ -1071,121 +2052,140 @@ app.post("/api/upload-file", upload.single("file"), async (req, res) => {
 
     // Trigger background worker
     (async () => {
-      let gcsUri = "";
-      let geminiFileUri = "";
       try {
-        const gcsDestination = `audios/${sessionId}_${mediaName}`;
-        try {
-          if (isDeveloperApiMode()) {
-            // Developer API cannot read gs:// URIs — the Files API path below will handle the upload.
-            console.log("[UPLOAD-FILE BG] Developer API mode: routing file through the Gemini Files API...");
-          } else {
-            gcsUri = await uploadToGCS(tempFilePath, gcsDestination, cleanMime);
-          }
-        } catch (gcsErr) {
-          console.warn("[GCS WARNING BG] Failed to upload to GCS, falling back to Gemini Files API:", gcsErr);
-        }
-
-        const ai = getGeminiClient();
-        let contentsPayload: any[] = [];
-
-        // Optimize plain-text files by reading them directly on the server (saves File API roundtrips/polling!)
         const isPlainText = cleanMime.startsWith("text/") || mediaName.endsWith(".txt") || mediaName.endsWith(".md") || mediaName.endsWith(".csv") || mediaName.endsWith(".json");
+        const isPDF = cleanMime.includes("pdf") || mediaName.endsWith(".pdf");
 
-        if (isPlainText) {
-          const textContent = fs.readFileSync(tempFilePath, "utf8");
-          contentsPayload = [{
-            text: `Analyze the following lecture notes or document text: "${mediaName}". Generate a high-fidelity summarized study companion following the structural responseSchema:
-            
-            === DOCUMENT CONTENT ===
-            ${textContent}
-            === END DOCUMENT CONTENT ===
-            
-            Make sure the mindMap structure is complete, featuring colorful, helpful levels of root topic, sub-topic, and subtopic children details.`
-          }];
+        if (!isPlainText && !isPDF) {
+          // Audio or Video: delegate to our new processAudioPipeline
+          await processAudioPipeline(
+            tempFilePath,
+            cleanMime,
+            mediaName,
+            mediaType || "audio",
+            selectedTemplate,
+            speakerContext,
+            userId,
+            sessionId,
+            initialSession,
+            processingMode
+          );
         } else {
-          // PDF or Audio or Video - Process natively via Vertex AI from GCS Uri
-          if (!gcsUri) {
-            console.log("[UPLOAD-FILE BG FALLBACK] GCS Upload failed or empty. Attempting Gemini Files API upload...");
-            const fileRef = await ai.files.upload({
-              file: tempFilePath,
-              config: {
-                mimeType: cleanMime,
-                displayName: mediaName,
-              }
-            });
-            geminiFileUri = fileRef.uri || "";
-            console.log(`[UPLOAD-FILE BG FALLBACK] Gemini Files upload successful: ${geminiFileUri}`);
+          // Plain text or PDF: proceed with original logic
+          let gcsUri = "";
+          let geminiFileUri = "";
+          const gcsDestination = `audios/${sessionId}_${mediaName}`;
+          try {
+            if (isDeveloperApiMode()) {
+              console.log("[UPLOAD-FILE BG] Developer API mode: routing file through the Gemini Files API...");
+            } else {
+              gcsUri = await uploadToGCS(tempFilePath, gcsDestination, cleanMime);
+            }
+          } catch (gcsErr) {
+            console.warn("[GCS WARNING BG] Failed to upload to GCS, falling back to Gemini Files API:", gcsErr);
           }
 
-          let contentPromptText = "";
-          if (cleanMime.includes("pdf")) {
-            contentPromptText = `You are a world-class academic summaries analyzer. Carefully study the uploaded PDF document: "${mediaName}".
-            Read and analyze every page. Capture key ideas, structures, formulas, and conclusions, and compile a high-fidelity study companion.`;
+          const ai = getGeminiClient();
+          let contentsPayload: any[] = [];
+
+          if (isPlainText) {
+            const textContent = fs.readFileSync(tempFilePath, "utf8");
+            contentsPayload = [{
+              text: `Analyze the following lecture notes or document text: "${mediaName}". Generate a high-fidelity summarized study companion following the structural responseSchema:
+              
+              === DOCUMENT CONTENT ===
+              ${textContent}
+              === END DOCUMENT CONTENT ===
+              
+              Make sure the mindMap structure is complete, featuring colorful, helpful levels of root topic, sub-topic, and subtopic children details.`
+            }];
           } else {
-            contentPromptText = `You are an advanced multimedia processor. Carefully analyze this uploaded ${mediaType || 'lecture media'} file: "${mediaName}".
-            Reconstruct the exact narrative flow as the transcript, timestamping key changes. Then compile a high-fidelity study suite.`;
-          }
+            // PDF
+            if (!gcsUri) {
+              console.log("[UPLOAD-FILE BG FALLBACK] GCS Upload failed or empty. Attempting Gemini Files API upload...");
+              const fileRef = await ai.files.upload({
+                file: tempFilePath,
+                config: {
+                  mimeType: cleanMime,
+                  displayName: mediaName,
+                }
+              });
+              geminiFileUri = fileRef.uri || "";
+              console.log(`[UPLOAD-FILE BG FALLBACK] Gemini Files upload successful: ${geminiFileUri}`);
+            }
 
-          contentsPayload = [
-            {
-              fileData: {
-                fileUri: gcsUri || geminiFileUri,
-                mimeType: cleanMime,
+            const contentPromptText = `You are a world-class academic summaries analyzer. Carefully study the uploaded PDF document: "${mediaName}".
+            Read and analyze every page. Capture key ideas, structures, formulas, and conclusions, and compile a high-fidelity study companion.`;
+
+            contentsPayload = [
+              {
+                fileData: {
+                  fileUri: gcsUri || geminiFileUri,
+                  mimeType: cleanMime,
+                }
+              },
+              {
+                text: `${contentPromptText}
+                
+                Generate fully populated and valid results in JSON format according to the supplied responseSchema:
+                1. An academic and professional title.
+                2. A beautiful detailed summary/resume in formatted Markdown based on the template layout: "${selectedTemplate.name}".
+                3. A complete timestamped narrative transcript or detailed chapter layout.
+                4. Structured follow-up Action Items.
+                5. A highly descriptive Mind Map concept hierarchy matching the MindMapNode schema structure.
+                6. Five to seven highly engaging study flashcards testing main concept outcomes.
+                
+                Generate fully populated and valid results in JSON format according to the supplied responseSchema.${speakerContext}
+                
+                CRITICAL REQUIREMENT: You MUST automatically detect the language written in the source document (e.g. Spanish, English). All generated text fields (title, summary, transcript, actionItems, mindMap, flashcards) MUST be entirely in that detected language.`
               }
-            },
-            {
-              text: `${contentPromptText}
-              
-              Generate fully populated and valid results in JSON format according to the supplied responseSchema:
-              1. An academic and professional title.
-              2. A beautiful detailed summary/resume in formatted Markdown based on the template layout: "${selectedTemplate.name}".
-              3. A complete timestamped narrative transcript or detailed chapter layout.
-              4. Structured follow-up Action Items.
-              5. A highly descriptive Mind Map concept hierarchy matching the MindMapNode schema structure.
-              6. Five to seven highly engaging study flashcards testing main concept outcomes.
-              
-              Generate fully populated and valid results in JSON format according to the supplied responseSchema.${speakerContext}
-              
-              CRITICAL REQUIREMENT: You MUST automatically detect the language spoken or written in the source audio/video/document (e.g. Spanish, English). All generated text fields (title, summary, transcript, actionItems, mindMap, flashcards) MUST be entirely in that detected language. Do not translate the content; write it fully in the detected language (for example, if the input is in Spanish, everything must be in Spanish).`
-            }
-          ];
-        }
-
-        console.log("[UPLOAD-FILE BG] Generating study companion from Gemini...");
-        const response = await generateWithFallback({
-          model: "gemini-2.5-flash",
-          contents: contentsPayload,
-          config: {
-            responseMimeType: "application/json",
-            responseSchema: currentResponseSchema,
-            temperature: 0.2
+            ];
           }
-        });
 
-        const parsedText = response.text;
-        if (!parsedText) throw new Error("No response output text was generated by Gemini.");
-
-        const parsedStudySession = JSON.parse(parsedText.trim());
-
-        const completedSession = {
-          ...initialSession,
-          ...parsedStudySession,
-          status: "completed",
-          gcsUri: gcsUri || geminiFileUri,
-          chatHistory: [
-            {
-              id: "welcome_msg",
-              role: "model" as const,
-              content: `¡Listo! He analizado tu archivo **"${mediaName}"** y he sintetizado "${parsedStudySession.title}" siguiendo la plantilla de formato elegida.`,
-              timestamp: new Date().toISOString()
+          console.log("[UPLOAD-FILE BG] Generating study companion from Gemini...");
+          const response = await generateWithFallback({
+            model: "gemini-2.5-flash",
+            contents: contentsPayload,
+            config: {
+              responseMimeType: "application/json",
+              responseSchema: currentResponseSchema,
+              temperature: 0.2,
+              maxOutputTokens: 8192
             }
-          ]
-        };
+          });
 
-        await firestore.collection("sessions").doc(sessionId).set(completedSession);
-        console.log(`[UPLOAD-FILE BG] Successfully completed and stored session ${sessionId}`);
+          const parsedText = response.text;
+          if (!parsedText) throw new Error("No response output text was generated by Gemini.");
 
+          const parsedStudySession = JSON.parse(parsedText.trim());
+
+          const completedSession = {
+            ...initialSession,
+            ...parsedStudySession,
+            status: "completed",
+            gcsUri: gcsUri || geminiFileUri,
+            chatHistory: [
+              {
+                id: "welcome_msg",
+                role: "model" as const,
+                content: `¡Listo! He analizado tu archivo **"${mediaName}"** y he sintetizado "${parsedStudySession.title}" siguiendo la plantilla de formato elegida.`,
+                timestamp: new Date().toISOString()
+              }
+            ]
+          };
+
+          await firestore.collection("sessions").doc(sessionId).set(completedSession);
+          console.log(`[UPLOAD-FILE BG] Successfully completed and stored session ${sessionId}`);
+
+          // Clean up the local temp file
+          try {
+            if (fs.existsSync(tempFilePath)) {
+              fs.unlinkSync(tempFilePath);
+            }
+          } catch (cleanupErr) {
+            console.error("Failed to delete temp file:", cleanupErr);
+          }
+        }
       } catch (bgErr: any) {
         console.error(`[UPLOAD-FILE BG ERROR] Session ${sessionId} failed:`, bgErr);
         await firestore.collection("sessions").doc(sessionId).update({
@@ -1193,8 +2193,7 @@ app.post("/api/upload-file", upload.single("file"), async (req, res) => {
           summary: `### ❌ Falla en el análisis de materiales\nEl procesamiento de fondo para tu archivo encontró un obstáculo:\n${bgErr.message || bgErr}`,
           error: bgErr.message || "An unexpected error occurred."
         });
-      } finally {
-        // Clean up the local temp file since it is now processed!
+        // Clean up the local temp file if it's still there
         try {
           if (fs.existsSync(tempFilePath)) {
             fs.unlinkSync(tempFilePath);
@@ -1251,7 +2250,7 @@ app.post("/api/upload-chunk", upload.single("chunk"), async (req, res) => {
 // Endpoint to merge chunks for large files and execute high-capacity Gemini curation
 app.post("/api/merge-chunks", async (req, res) => {
   try {
-    const { uploadId, fileName, mediaType, mimeType, totalChunks } = req.body;
+    const { uploadId, fileName, mediaType, mimeType, totalChunks, templateId, processingMode } = req.body;
 
     if (!uploadId || !fileName || totalChunks === undefined) {
       res.status(400).json({ error: "Missing merge parameters: uploadId, fileName, or totalChunks." });
@@ -1291,21 +2290,8 @@ app.post("/api/merge-chunks", async (req, res) => {
     const fileStats = fs.statSync(mergedFilePath);
     console.log(`[MERGE DONE] reassembled at: ${mergedFilePath}, final size: ${Math.round(fileStats.size / 1024 / 1024)}MB`);
 
-    // Pre-generate session ID and upload reassembled file to GCS under tenant account
+    // Pre-generate session ID
     const sessionId = "sess_" + Date.now().toString(36);
-    const gcsDestination = `audios/${sessionId}_${fileName}`;
-    
-    let gcsUri = "";
-    try {
-      if (isDeveloperApiMode()) {
-        // Developer API cannot read gs:// URIs — the Files API path below will handle the upload.
-        console.log("[MERGE-CHUNKS] Developer API mode: routing reassembled file through the Gemini Files API...");
-      } else {
-        gcsUri = await uploadToGCS(mergedFilePath, gcsDestination, mimeType || "");
-      }
-    } catch (gcsErr) {
-      console.warn("[GCS WARNING] Failed to upload reassembled file to GCS:", gcsErr);
-    }
 
     // Proactively clean up chunk folder
     try {
@@ -1318,140 +2304,214 @@ app.post("/api/merge-chunks", async (req, res) => {
       console.warn("Warning: Chunk assets garbage collection failed:", cleanupErr);
     }
 
-    // Now, run the actual Gemini analysis on the newly fully-assembled file
-    const ai = getGeminiClient();
-    let contentsPayload: any[] = [];
-    let geminiFileUri = "";
     const isPlainText = mimeType.startsWith("text/") || fileName.endsWith(".txt") || fileName.endsWith(".md") || fileName.endsWith(".csv") || fileName.endsWith(".json");
+    const isPDF = mimeType.includes("pdf") || fileName.endsWith(".pdf");
 
-    if (isPlainText) {
-      const textContent = fs.readFileSync(mergedFilePath, "utf8");
-      
-      try {
-        fs.unlinkSync(mergedFilePath);
-      } catch (err) {
-        console.error("Failed to delete assembled text file:", err);
-      }
+    // Fetch user speaker profiles and selected template definitions
+    const speakerContext = await getUserSpeakerContext(userId);
+    const selectedTemplate = getTemplateById(templateId || "client-needs");
 
-      contentsPayload = [{
-        text: `Analyze the following lecture notes or document text: "${fileName}". Generate a high-fidelity summarized study companion following the structural responseSchema:
-        
-        === DOCUMENT CONTENT ===
-        ${textContent}
-        === END DOCUMENT CONTENT ===
-        
-        Make sure the mindMap structure is complete, featuring colorful, helpful levels of root topic, sub-topic, and subtopic children details.`
-      }];
-    } else {
-      // PDF or Audio or Video - Process natively via Vertex AI from GCS Uri
-      if (!gcsUri) {
-        console.log("[MERGE-CHUNKS FALLBACK] GCS Upload failed or empty. Attempting Gemini Files API upload...");
-        try {
-          const fileRef = await ai.files.upload({
-            file: mergedFilePath,
-            config: {
-              mimeType: mimeType || "",
-              displayName: fileName,
-            }
-          });
-          geminiFileUri = fileRef.uri || "";
-          console.log(`[MERGE-CHUNKS FALLBACK] Gemini Files upload successful: ${geminiFileUri}`);
-        } catch (geminiErr: any) {
-          console.error("[MERGE-CHUNKS FALLBACK ERROR] Gemini Files upload failed:", geminiErr);
-          const classified = classifyError(geminiErr);
-          res.status(classified.errorType === "AUTH" ? 401 : 500).json({
-            error: `File processing failed (both GCS and Gemini Files API uploads failed): ${classified.message}`,
-            errorType: classified.errorType
-          });
-          return;
-        }
-      }
-
-      // Clean up the local temp merged file since it is now uploaded to GCS or Gemini Files securely!
-      try {
-        if (fs.existsSync(mergedFilePath)) {
-          fs.unlinkSync(mergedFilePath);
-          console.log(`[PROCESO REENSAMBLADO] Temp merged file cleaned up. Processing via URI: ${gcsUri || geminiFileUri}`);
-        }
-      } catch (cleanupErr) {
-        console.error("Failed to clean up temp merged file post-upload:", cleanupErr);
-      }
-
-      let contentPromptText = "";
-      if (mimeType.includes("pdf")) {
-        contentPromptText = `You are a world-class academic summaries analyzer. Carefully study the uploaded PDF document: "${fileName}".
-        Read and analyze every page. Capture key ideas, structures, formulas, and conclusions, and compile a high-fidelity study companion.`;
-      } else {
-        contentPromptText = `You are an advanced multimedia processor. Carefully analyze this uploaded ${mediaType || 'lecture media'} file: "${fileName}".
-        Reconstruct the exact narrative flow as the transcript, timestamping key changes. Then compile a high-fidelity study suite.`;
-      }
-
-      contentsPayload = [
-        {
-          fileData: {
-            fileUri: gcsUri || geminiFileUri,
-            mimeType: mimeType,
-          }
-        },
-        {
-          text: `${contentPromptText}
-          
-          Generate fully populated and valid results in JSON format according to the supplied responseSchema:
-          1. An academic and professional title.
-          2. A beautiful detailed summary/resume in formatted Markdown.
-          3. A complete timestamped narrative transcript or detailed chapter layout.
-          4. Structured follow-up Action Items.
-          5. A highly descriptive Mind Map concept hierarchy matching the MindMapNode schema structure.
-          6. Five to seven highly engaging study flashcards testing main concept outcomes.
-          
-          CRITICAL REQUIREMENT: You MUST automatically detect the language spoken or written in the source audio/video/document (e.g. Spanish, English). All generated text fields (title, summary, transcript, actionItems, mindMap, flashcards) MUST be entirely in that detected language. Do not translate the content; write it fully in the detected language (for example, if the input is in Spanish, everything must be in Spanish).`
-        }
-      ];
-    }
-
-    console.log("Generating study companion from Gemini on reassembled dataset...");
-    const response = await generateWithFallback({
-      model: "gemini-2.5-flash",
-      contents: contentsPayload,
-      config: {
-        responseMimeType: "application/json",
-        responseSchema: studyResponseSchema,
-        temperature: 0.2
-      }
-    });
-
-    const parsedText = response.text;
-    if (!parsedText) {
-      throw new Error("No response output text was generated by Gemini.");
-    }
-
-    let parsedStudySession;
-    try {
-      parsedStudySession = JSON.parse(parsedText.trim());
-    } catch (parseErr) {
-      console.error("JSON parsing error of Gemini output. Output was:", parsedText);
-      throw new Error("Gemini generated study content, but it was not formatted in conformant JSON. Please retry.");
-    }
-
-    const formattedResult = {
+    // Create initial placeholder session doc in Firestore with status 'processing'
+    const initialSession = {
       id: sessionId,
-      userId: userId, // Attach User ID
+      userId: userId,
+      title: fileName || "Procesando audio...",
       createdAt: new Date().toISOString(),
-      mediaType: mediaType || (mimeType.includes("pdf") ? "pdf" : "audio"),
-      mediaName: fileName,
-      gcsUri: gcsUri || geminiFileUri, // Store GCS URI
-      ...parsedStudySession,
+      mediaType: mediaType || 'audio',
+      mediaName: fileName || "Uploaded File",
+      status: "processing",
+      summary: "### Procesando tu archivo de fondo...\nPor favor espera mientras la IA realiza la transcripción diarizada por oradores y la síntesis con la plantilla seleccionada. Puedes navegar libremente por la app.",
+      transcript: "[00:00] Transcribiendo conversación...",
+      actionItems: [],
+      mindMap: { id: "root", label: "Procesando...", details: "" },
+      flashcards: [],
       chatHistory: [
         {
           id: "welcome_msg",
           role: "model" as const,
-          content: `Hi there! I am your AI Study Companion. From your uploaded ${mimeType.includes("pdf") ? "PDF document" : "file"} **"${fileName}"**, I have synthesized "${parsedStudySession.title}". It features an academic summary, interactive mind map coordinate grid, checklist items, and active recall flashcards. Ask me anything or request a quiz!`,
+          content: "Tu archivo se está transcribiendo y procesando de forma asíncrona de fondo con Gemini. Cerramos la conexión para evitar timeouts. Te depararemos un informe completo de inmediato.",
           timestamp: new Date().toISOString()
         }
       ]
     };
 
-    res.json(formattedResult);
+    console.log(`[ASYNC MERGE] Saving initial processing placeholder session: ${sessionId}`);
+    await firestore.collection("sessions").doc(sessionId).set(initialSession);
+
+    // Immediately return the 202 status and placeholder object to the client
+    res.status(202).json(initialSession);
+
+    // Trigger background worker
+    (async () => {
+      try {
+        if (!isPlainText && !isPDF) {
+          // Audio or Video: delegate to processAudioPipeline
+          await processAudioPipeline(
+            mergedFilePath,
+            mimeType,
+            fileName,
+            mediaType || "audio",
+            selectedTemplate,
+            speakerContext,
+            userId,
+            sessionId,
+            initialSession,
+            processingMode
+          );
+        } else {
+          // Plain text or PDF: proceed with original logic in background
+          const gcsDestination = `audios/${sessionId}_${fileName}`;
+          let gcsUri = "";
+          try {
+            if (isDeveloperApiMode()) {
+              console.log("[MERGE-CHUNKS BG] Developer API mode: routing reassembled file through the Gemini Files API...");
+            } else {
+              gcsUri = await uploadToGCS(mergedFilePath, gcsDestination, mimeType || "");
+            }
+          } catch (gcsErr) {
+            console.warn("[GCS WARNING BG] Failed to upload reassembled file to GCS:", gcsErr);
+          }
+
+          const ai = getGeminiClient();
+          let contentsPayload: any[] = [];
+          let geminiFileUri = "";
+
+          if (isPlainText) {
+            const textContent = fs.readFileSync(mergedFilePath, "utf8");
+            try {
+              fs.unlinkSync(mergedFilePath);
+            } catch (err) {
+              console.error("Failed to delete assembled text file:", err);
+            }
+
+            contentsPayload = [{
+              text: `Analyze the following lecture notes or document text: "${fileName}". Generate a high-fidelity summarized study companion following the structural responseSchema:
+              
+              === DOCUMENT CONTENT ===
+              ${textContent}
+              === END DOCUMENT CONTENT ===
+              
+              Make sure the mindMap structure is complete, featuring colorful, helpful levels of root topic, sub-topic, and subtopic children details.`
+            }];
+          } else {
+            // PDF
+            if (!gcsUri) {
+              console.log("[MERGE-CHUNKS BG FALLBACK] GCS Upload failed or empty. Attempting Gemini Files API upload...");
+              try {
+                const fileRef = await ai.files.upload({
+                  file: mergedFilePath,
+                  config: {
+                    mimeType: mimeType || "",
+                    displayName: fileName,
+                  }
+                });
+                geminiFileUri = fileRef.uri || "";
+                console.log(`[MERGE-CHUNKS BG FALLBACK] Gemini Files upload successful: ${geminiFileUri}`);
+              } catch (geminiErr: any) {
+                console.error("[MERGE-CHUNKS BG FALLBACK ERROR] Gemini Files upload failed:", geminiErr);
+                throw geminiErr;
+              }
+            }
+
+            try {
+              if (fs.existsSync(mergedFilePath)) {
+                fs.unlinkSync(mergedFilePath);
+              }
+            } catch (cleanupErr) {
+              console.error("Failed to clean up temp merged file post-upload:", cleanupErr);
+            }
+
+            const contentPromptText = `You are a world-class academic summaries analyzer. Carefully study the uploaded PDF document: "${fileName}".
+            Read and analyze every page. Capture key ideas, structures, formulas, and conclusions, and compile a high-fidelity study companion.`;
+
+            // Dynamic response schema override for selected template structure
+            const currentResponseSchema = JSON.parse(JSON.stringify(studyResponseSchema));
+            currentResponseSchema.properties.summary.description = `A beautifully detailed markdown executive summary structured strictly following the layout, headers, blockquotes, and lists of this template:\n${selectedTemplate.prompt}`;
+
+            contentsPayload = [
+              {
+                fileData: {
+                  fileUri: gcsUri || geminiFileUri,
+                  mimeType: mimeType,
+                }
+              },
+              {
+                text: `${contentPromptText}
+                
+                Generate fully populated and valid results in JSON format according to the supplied responseSchema:
+                1. An academic and professional title.
+                2. A beautiful detailed summary/resume in formatted Markdown based on the template layout: "${selectedTemplate.name}".
+                3. A complete timestamped narrative transcript or detailed chapter layout.
+                4. Structured follow-up Action Items.
+                5. A highly descriptive Mind Map concept hierarchy matching the MindMapNode schema structure.
+                6. Five to seven highly engaging study flashcards testing main concept outcomes.
+                
+                Generate fully populated and valid results in JSON format according to the supplied responseSchema.${speakerContext}
+                
+                CRITICAL REQUIREMENT: You MUST automatically detect the language spoken or written in the source audio/video/document (e.g. Spanish, English). All generated text fields (title, summary, transcript, actionItems, mindMap, flashcards) MUST be entirely in that detected language.`
+              }
+            ];
+          }
+
+          console.log("[MERGE-CHUNKS BG] Generating study companion from Gemini on reassembled dataset...");
+          
+          // Dynamic response schema override for selected template structure
+          const currentResponseSchema = JSON.parse(JSON.stringify(studyResponseSchema));
+          currentResponseSchema.properties.summary.description = `A beautifully detailed markdown executive summary structured strictly following the layout, headers, blockquotes, and lists of this template:\n${selectedTemplate.prompt}`;
+
+          const response = await generateWithFallback({
+            model: "gemini-2.5-flash",
+            contents: contentsPayload,
+            config: {
+              responseMimeType: "application/json",
+              responseSchema: currentResponseSchema,
+              temperature: 0.2,
+              maxOutputTokens: 8192
+            }
+          });
+
+          const parsedText = response.text;
+          if (!parsedText) {
+            throw new Error("No response output text was generated by Gemini.");
+          }
+
+          const parsedStudySession = JSON.parse(parsedText.trim());
+
+          const completedSession = {
+            ...initialSession,
+            ...parsedStudySession,
+            status: "completed",
+            gcsUri: gcsUri || geminiFileUri,
+            chatHistory: [
+              {
+                id: "welcome_msg",
+                role: "model" as const,
+                content: `¡Listo! He analizado tu archivo **"${fileName}"** y he sintetizado "${parsedStudySession.title}" siguiendo la plantilla de formato elegida.`,
+                timestamp: new Date().toISOString()
+              }
+            ]
+          };
+
+          await firestore.collection("sessions").doc(sessionId).set(completedSession);
+          console.log(`[MERGE-CHUNKS BG] Successfully completed and stored session ${sessionId}`);
+        }
+      } catch (bgErr: any) {
+        console.error(`[MERGE-CHUNKS BG ERROR] Background processing for session ${sessionId} failed:`, bgErr);
+        await firestore.collection("sessions").doc(sessionId).update({
+          status: "failed",
+          summary: `### ❌ Falla en el análisis de materiales\nEl procesamiento de fondo para tu archivo encontró un obstáculo:\n${bgErr.message || bgErr}`,
+          error: bgErr.message || "An unexpected error occurred during background processing."
+        });
+        // Clean up the local temp merged file if it exists
+        try {
+          if (fs.existsSync(mergedFilePath)) {
+            fs.unlinkSync(mergedFilePath);
+          }
+        } catch (cleanupErr) {
+          console.error("Failed to delete temp reassembled file:", cleanupErr);
+        }
+      }
+    })();
 
   } catch (error: any) {
     console.warn("[CHUNK ASSEMBLY PROCESS ERROR] Failed to process reassembled file:", error);
@@ -1500,7 +2560,10 @@ app.get("/api/sessions/:id/status", async (req, res, next) => {
     res.json({
       status: data?.status || "completed",
       error: data?.error || null,
-      title: data?.title || data?.mediaName || "Procesando..."
+      title: data?.title || data?.mediaName || "Procesando...",
+      logs: data?.logs || [],
+      progress: data?.progress || 0,
+      summary: data?.summary || ""
     });
   } catch (error: any) {
     console.error("[FIRESTORE ERROR] Failed to fetch session status:", error);
@@ -1884,5 +2947,7 @@ async function startServer() {
   });
 }
 
-startServer();
+if (!process.env.VITEST) {
+  startServer();
+}
 

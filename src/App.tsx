@@ -309,6 +309,7 @@ export default function App() {
   const [isChatOpen, setIsChatOpen] = useState(false);
   const [isSidebarCollapsed, setIsSidebarCollapsed] = useState(false);
   const [selectedTemplateId, setSelectedTemplateId] = useState("client-needs");
+  const [processingMode, setProcessingMode] = useState<"turbo" | "high-fidelity">("high-fidelity");
   const [activePreviewTemplateId, setActivePreviewTemplateId] = useState<string | null>(null);
   const [frequentSpeakers, setFrequentSpeakers] = useState("");
   const [activeSidebarTab, setActiveSidebarTab] = useState<"history" | "templates">("history");
@@ -762,6 +763,20 @@ This workspace was custom-curated in **⚡ Turbo Fast-Track Mode** to bypass bro
         if (response.ok) {
           const data = await response.json();
           console.log(`[POLLING] Status for ${sessionId}:`, data.status);
+
+          // Update the session in-memory with real-time logs, progress, and summary
+          setSessions(prevSessions => prevSessions.map(s => {
+            if (s.id === sessionId) {
+              return {
+                ...s,
+                status: data.status,
+                logs: data.logs || [],
+                progress: data.progress !== undefined ? data.progress : s.progress,
+                summary: data.summary || s.summary
+              };
+            }
+            return s;
+          }));
           
           if (data.status === "completed" || data.status === "failed") {
             clearInterval(interval);
@@ -897,12 +912,11 @@ This workspace was custom-curated in **⚡ Turbo Fast-Track Mode** to bypass bro
     }
   };
 
-  // Send standard multipart upload to ensure robust stateless execution across any scaled instances
+  // Send dynamic chunked upload or standard multipart upload depending on file size
   const processStudyFile = async (file: File) => {
     setUploadError(null);
     setUploadErrorType(null);
-    setProcessingStatus({ stage: "uploading", progress: 10, message: "Uploading asset to central workspace..." });
-
+    
     const isAudio = file.type.startsWith("audio/") || file.name.endsWith(".mp3") || file.name.endsWith(".wav") || file.name.endsWith(".m4a") || file.name.endsWith(".ogg");
     const isVideo = file.type.startsWith("video/") || file.name.endsWith(".mp4") || file.name.endsWith(".webm") || file.name.endsWith(".mov");
     const isPdf = file.type === "application/pdf" || file.name.endsWith(".pdf");
@@ -915,43 +929,111 @@ This workspace was custom-curated in **⚡ Turbo Fast-Track Mode** to bypass bro
     else if (isPdf) mediaType = "pdf";
     else if (isText) mediaType = "document";
 
+    const userId = user ? user.uid : "guest";
+
     try {
-      const formData = new FormData();
-      formData.append("file", file);
-      formData.append("mediaType", mediaType);
-      formData.append("templateId", selectedTemplateId);
+      let responseData: any;
 
-      // Start the merge/OCR simulation stages to run concurrently during server-side processing
-      const delayPromise = simulateMergeStages(isPdf);
+      if (file.size > 5 * 1024 * 1024) {
+        // --- CHUNKED UPLOAD FLOW ---
+        const CHUNK_SIZE = 3 * 1024 * 1024; // 3MB per chunk
+        const totalChunks = Math.ceil(file.size / CHUNK_SIZE);
+        const uploadId = "upload_" + Date.now().toString(36) + Math.random().toString(36).substring(2, 6);
 
-      const userId = user ? user.uid : "guest";
-      const fetchPromise = fetch("/api/upload-file", {
-        method: "POST",
-        headers: { "x-user-id": userId },
-        body: formData
-      });
+        console.log(`[FE CHUNKED UPLOAD] File size: ${Math.round(file.size / 1024 / 1024)}MB. Total chunks: ${totalChunks}. Id: ${uploadId}`);
+        setProcessingStatus({ stage: "uploading", progress: 5, message: `Iniciando subida de fragmentos...` });
 
-      // Await both the upload completion/Gemini generation + the user-experience simulation stages
-      const [_, response] = await Promise.all([delayPromise, fetchPromise]);
+        for (let i = 0; i < totalChunks; i++) {
+          const start = i * CHUNK_SIZE;
+          const end = Math.min((i + 1) * CHUNK_SIZE, file.size);
+          const chunkBlob = file.slice(start, end);
 
-      const responseText = await response.text();
-      const isHtml = responseText.includes("Cookie check") || responseText.includes("Action required to load") || responseText.trim().toLowerCase().startsWith("<!doctype html>");
-      if (isHtml) {
-        throw new Error("COOKIE_BLOCKED_ERROR: Tu navegador está bloqueando las cookies de seguridad requeridas por el iframe de AI Studio (común en Safari, iOS o modo incógnito). Para solucionarlo, haz clic en el botón de abajo para abrir la aplicación en una pestaña independiente.");
-      }
+          const chunkFormData = new FormData();
+          chunkFormData.append("chunk", chunkBlob, file.name);
+          chunkFormData.append("uploadId", uploadId);
+          chunkFormData.append("chunkIndex", String(i));
 
-      let responseData;
-      try {
-        responseData = JSON.parse(responseText);
-      } catch (e) {
-        console.error("Failed to parse response JSON. Raw text:", responseText);
-        throw new Error(`Server returned non-JSON response: ${responseText.slice(0, 300)}`);
-      }
+          setProcessingStatus({ 
+            stage: "uploading", 
+            progress: Math.round((i / totalChunks) * 80) + 5, 
+            message: `Subiendo fragmento ${i + 1} de ${totalChunks} (${Math.round((end / file.size) * 100)}%)...` 
+          });
 
-      if (!response.ok) {
-        const e = new Error(responseData.error || "Material analysis failed. Please check Gemini API config.");
-        (e as any).errorType = responseData.errorType;
-        throw e;
+          const chunkResponse = await fetch("/api/upload-chunk", {
+            method: "POST",
+            body: chunkFormData
+          });
+
+          if (!chunkResponse.ok) {
+            const errText = await chunkResponse.text();
+            throw new Error(`Error subiendo fragmento ${i + 1} de ${totalChunks}: ${errText}`);
+          }
+        }
+
+        setProcessingStatus({ stage: "uploading", progress: 90, message: "Enviando solicitud de fusión de fragmentos..." });
+
+        const mergeResponse = await fetch("/api/merge-chunks", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "x-user-id": userId
+          },
+          body: JSON.stringify({
+            uploadId,
+            fileName: file.name,
+            mediaType,
+            mimeType: file.type,
+            totalChunks,
+            templateId: selectedTemplateId,
+            processingMode
+          })
+        });
+
+        const mergeResponseText = await mergeResponse.text();
+        if (!mergeResponse.ok) {
+          throw new Error(`Error en la fusión de fragmentos: ${mergeResponseText}`);
+        }
+
+        responseData = JSON.parse(mergeResponseText);
+
+      } else {
+        // --- STANDARD SINGLE MULTIPART UPLOAD FLOW ---
+        setProcessingStatus({ stage: "uploading", progress: 10, message: "Subiendo archivo a tu espacio de trabajo corporativo..." });
+
+        const formData = new FormData();
+        formData.append("file", file);
+        formData.append("mediaType", mediaType);
+        formData.append("templateId", selectedTemplateId);
+        formData.append("processingMode", processingMode);
+
+        const delayPromise = simulateMergeStages(isPdf);
+
+        const fetchPromise = fetch("/api/upload-file", {
+          method: "POST",
+          headers: { "x-user-id": userId },
+          body: formData
+        });
+
+        const [_, response] = await Promise.all([delayPromise, fetchPromise]);
+
+        const responseText = await response.text();
+        const isHtml = responseText.includes("Cookie check") || responseText.includes("Action required to load") || responseText.trim().toLowerCase().startsWith("<!doctype html>");
+        if (isHtml) {
+          throw new Error("COOKIE_BLOCKED_ERROR: Tu navegador está bloqueando las cookies de seguridad requeridas por el iframe de AI Studio (común en Safari, iOS o modo incógnito). Para solucionarlo, haz clic en el botón de abajo para abrir la aplicación en una pestaña independiente.");
+        }
+
+        try {
+          responseData = JSON.parse(responseText);
+        } catch (e) {
+          console.error("Failed to parse response JSON. Raw text:", responseText);
+          throw new Error(`Server returned non-JSON response: ${responseText.slice(0, 300)}`);
+        }
+
+        if (!response.ok) {
+          const e = new Error(responseData.error || "Material analysis failed. Please check Gemini API config.");
+          (e as any).errorType = responseData.errorType;
+          throw e;
+        }
       }
 
       const completedSession: StudySession = responseData;
@@ -972,7 +1054,7 @@ This workspace was custom-curated in **⚡ Turbo Fast-Track Mode** to bypass bro
       setActiveTab("transcript");
 
       if (completedSession.status === "processing") {
-        setProcessingStatus({ stage: "completed", progress: 100, message: "Archivo subido con éxito, procesando en la nube..." });
+        setProcessingStatus({ stage: "completed", progress: 100, message: "Archivo subido con éxito, procesando de fondo..." });
         pollSessionStatus(completedSession.id, localAudioUrl);
       } else {
         setProcessingStatus({ stage: "completed", progress: 100, message: "Workspace companion compiled successfully!" });
@@ -984,7 +1066,7 @@ This workspace was custom-curated in **⚡ Turbo Fast-Track Mode** to bypass bro
       }, 1000);
 
     } catch (err: any) {
-      console.error("Stateless upload process failure:", err);
+      console.error("Upload process failure:", err);
       setUploadError(err.message || "Failed to analyze material. Verify secrets setting.");
       setUploadErrorType(err.errorType || null);
       setProcessingStatus({ stage: "failed", progress: 0, message: "" });
@@ -1039,15 +1121,10 @@ This workspace was custom-curated in **⚡ Turbo Fast-Track Mode** to bypass bro
   };
 
   // Mic audio capture pipeline
-  const handleMicAudioReady = (base64: string, mime: string, durationSec: number, localUrl?: string) => {
-    processStudyContent({
-      mediaName: `Voice Session Memo (${durationSec}s)`,
-      mediaType: "audio",
-      base64Data: base64,
-      mimeType: mime,
-      isSample: false,
-      localAudioUrl: localUrl
-    });
+  const handleMicAudioReady = (file: File, durationSec: number, localUrl?: string) => {
+    const ext = file.name.split('.').pop() || "webm";
+    const renamedFile = new File([file], `Voice Session Memo (${durationSec}s).${ext}`, { type: file.type });
+    processStudyFile(renamedFile);
   };
 
   // Audio Playback Player controller helper methods
@@ -1918,12 +1995,14 @@ This workspace was custom-curated in **⚡ Turbo Fast-Track Mode** to bypass bro
                     </div>
                   </div>
 
-                  {/* Redesigned Tab Switcher Bar & AI Trigger (Reordered: Transcript first, removed Mind Map) */}
+                  {/* Redesigned Tab Switcher Bar & AI Trigger (Reordered: Transcript first, restored Mind Map and Flashcards) */}
                   <div className="flex items-center gap-3 self-start sm:self-auto flex-wrap">
                     <div className="flex bg-white rounded-xl border border-slate-200/80 p-1 shadow-3xs overflow-x-auto">
                       {[
                         { id: "transcript", label: "Transcript" },
                         { id: "summary", label: "Summary" },
+                        { id: "mindmap", label: "Mind Map" },
+                        { id: "flashcards", label: "Flashcards" },
                         { id: "infographics", label: "Infographics" },
                         { id: "tasks", label: "Goals" }
                       ].map((subTab) => {
@@ -2060,6 +2139,24 @@ This workspace was custom-curated in **⚡ Turbo Fast-Track Mode** to bypass bro
                     </div>
                   )}
 
+                  {activeTab === "mindmap" && (
+                    <div className="flex-1 min-h-0 flex flex-col">
+                      <MindMapCanvas 
+                        rootNode={activeSession.mindMap} 
+                        onAskAI={handleAskAI}
+                      />
+                    </div>
+                  )}
+
+                  {activeTab === "flashcards" && (
+                    <div className="flex-1 min-h-0 overflow-y-auto">
+                      <FlashcardsDeck 
+                        cards={activeSession.flashcards} 
+                        onToggleLearned={handleToggleFlashcardLearned}
+                      />
+                    </div>
+                  )}
+
                   {activeTab === "summary" && (
                     <div className="flex-1 flex flex-col min-h-0 animate-fade-in">
                       
@@ -2113,6 +2210,27 @@ This workspace was custom-curated in **⚡ Turbo Fast-Track Mode** to bypass bro
                       {/* Spacious text reader body */}
                       <div className="flex-1 pr-1 pb-4">
                         <FormatMarkdown text={activeSession.summary} />
+
+                        {activeSession.status === "processing" && activeSession.logs && activeSession.logs.length > 0 && (
+                          <div className="mt-8 bg-slate-950 text-slate-200 p-5 rounded-2xl font-mono text-[11px] space-y-2.5 border border-slate-800 shadow-lg max-h-72 overflow-y-auto animate-fade-in leading-normal select-text">
+                            <div className="text-slate-400 border-b border-slate-800 pb-2 mb-3 flex items-center justify-between font-sans font-bold">
+                              <span className="flex items-center gap-1.5 text-xs text-slate-300">⚙️ LOGS DE PROCESAMIENTO EN TIEMPO REAL</span>
+                              <div className="flex items-center gap-2">
+                                <span className="w-2 h-2 rounded-full bg-emerald-500 animate-ping shrink-0" />
+                                <span className="text-[10px] text-emerald-400 uppercase font-black">Procesando ({activeSession.progress || 0}%)</span>
+                              </div>
+                            </div>
+                            <div className="space-y-1.5 overflow-x-auto">
+                              {activeSession.logs.map((log: any, idx: number) => (
+                                <div key={idx} className="flex gap-3 leading-relaxed">
+                                  <span className="text-slate-500 shrink-0 select-none">[{new Date(log.timestamp).toLocaleTimeString()}]</span>
+                                  <span className="text-indigo-400 font-extrabold shrink-0 select-none">[{log.stage}]</span>
+                                  <span className="text-slate-300">{log.message}</span>
+                                </div>
+                              ))}
+                            </div>
+                          </div>
+                        )}
                       </div>
                     </div>
                   )}
@@ -2170,10 +2288,131 @@ This workspace was custom-curated in **⚡ Turbo Fast-Track Mode** to bypass bro
           </section>
         ) : (
           /* SECTION B: NO active study session - Welcome & uploader suite */
-          <section className="flex-1 bg-slate-50/50 p-6 md:p-12 overflow-y-auto h-full flex items-center justify-center">
+          <section className="flex-1 grid grid-cols-12 gap-0 overflow-hidden min-h-0 relative">
             
-            {/* Center aligned Apple-style Minimal Ingestion Card */}
-            <div className="max-w-xl w-full bg-white border border-slate-200/80 rounded-3xl p-8 md:p-10 shadow-sm flex flex-col gap-6 animate-fade-in">
+            {/* Column 1: Clean, Consolidated Sidebar (Span 3) */}
+            {!isSidebarCollapsed && (
+              <div className="col-span-12 lg:col-span-3 border-r border-slate-200 p-5 flex flex-col gap-6 bg-white overflow-y-auto h-full animate-fade-in">
+                {activeSidebarTab === "templates" ? (
+                  /* Formatos de Resumen (Templates) Panel */
+                  <div className="space-y-4 animate-fade-in">
+                    <div className="flex items-center gap-1.5 border-b border-slate-50 pb-3 mb-1">
+                      <BookOpen className="h-5 w-5 text-indigo-500 animate-pulse" />
+                      <div>
+                        <h2 className="font-sans text-sm font-bold text-slate-800">Formatos de Resumen</h2>
+                        <p className="font-sans text-[10px] text-slate-400">Selecciona el template de estructuración</p>
+                      </div>
+                    </div>
+                    
+                    <div className="flex flex-col gap-2 pr-1">
+                      {SUMMARY_TEMPLATES.map((tpl) => {
+                        const isSelected = selectedTemplateId === tpl.id;
+                        return (
+                          <button
+                            key={tpl.id}
+                            onClick={() => setActivePreviewTemplateId(tpl.id)}
+                            className={`text-left text-xs font-bold px-3 py-2.5 rounded-xl transition flex flex-col gap-1 border cursor-pointer ${
+                              isSelected 
+                                ? "bg-slate-900 border-slate-900 text-white shadow-2xs" 
+                                : "bg-slate-50 border-slate-200/50 text-slate-700 hover:bg-slate-100/50 hover:border-slate-250"
+                            }`}
+                            title="Haz clic para ver detalles y previsualizar estructura"
+                          >
+                            <span className="font-extrabold truncate block w-full">{tpl.name}</span>
+                            <span className={`text-[9px] font-medium leading-none ${isSelected ? "text-indigo-200" : "text-slate-400"}`}>
+                              {tpl.category}
+                            </span>
+                            <p className={`text-[10px] leading-relaxed font-normal ${isSelected ? "text-slate-200" : "text-slate-500"}`}>
+                              {tpl.description}
+                            </p>
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </div>
+                ) : (
+                  /* Standard Explorer Panel (History & Folders) */
+                  <div className="space-y-6 animate-fade-in flex flex-col h-full">
+                    {/* Topic Folders (Temas) widget */}
+                    <div className="space-y-4">
+                      <div className="flex items-center justify-between">
+                        <div className="flex items-center gap-1.5">
+                          <FolderTree className="h-4 w-4 text-indigo-500" />
+                          <span className="text-[10px] font-bold uppercase text-slate-400 tracking-wider">Temas de Reunión</span>
+                        </div>
+                        <button 
+                          onClick={() => {
+                            const name = prompt("Ingrese el nombre del nuevo Tema:");
+                            if (name && name.trim()) handleCreateFolder(name);
+                          }}
+                          className="text-[10px] font-bold text-indigo-600 hover:text-indigo-800 transition flex items-center gap-0.5 cursor-pointer"
+                        >
+                          + Nuevo
+                        </button>
+                      </div>
+
+                      <div className="flex flex-col gap-1.5 max-h-[140px] overflow-y-auto pr-1">
+                        <button
+                          onClick={() => setActiveFolderId(null)}
+                          className={`text-left text-xs font-semibold px-2.5 py-1.5 rounded-lg transition flex items-center justify-between cursor-pointer ${
+                            activeFolderId === null 
+                              ? "bg-indigo-50 text-indigo-700" 
+                              : "text-slate-600 hover:bg-slate-50"
+                          }`}
+                        >
+                          <span className="truncate">📂 Todos los Temas</span>
+                          <span className="text-[10px] text-slate-400">({sessions.length})</span>
+                        </button>
+
+                        {folders.map(folder => {
+                          const folderSessions = sessions.filter(s => s.folderId === folder.id);
+                          const isSelected = activeFolderId === folder.id;
+                          return (
+                            <button
+                              key={folder.id}
+                              onClick={() => setActiveFolderId(folder.id)}
+                              className={`text-left text-xs font-semibold px-2.5 py-1.5 rounded-lg transition flex items-center justify-between cursor-pointer ${
+                                isSelected 
+                                  ? "bg-indigo-50 text-indigo-700" 
+                                  : "text-slate-600 hover:bg-slate-50"
+                              }`}
+                            >
+                              <span className="truncate">📂 {folder.name}</span>
+                              <span className="text-[10px] text-slate-400">({folderSessions.length})</span>
+                            </button>
+                          );
+                        })}
+                      </div>
+                    </div>
+
+                    {/* Saved Study Library list widget */}
+                    <div className="border-t border-slate-100 pt-5 mt-auto">
+                      <SidebarHistory 
+                        sessions={activeFolderId ? sessions.filter(s => s.folderId === activeFolderId) : sessions} 
+                        activeSessionId={activeSessionId}
+                        onSelectSession={(id) => { setActiveSessionId(id); setActiveTab("summary"); }}
+                        onDeleteSession={handleDeleteSession}
+                      />
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
+
+            {/* Column 2: Centered Ingestion Card Area */}
+            <div className={`col-span-12 ${isSidebarCollapsed ? "lg:col-span-12" : "lg:col-span-9"} bg-slate-50/50 p-6 md:p-12 overflow-y-auto h-full flex items-center justify-center relative`}>
+              
+              {/* Sidebar toggle handle button */}
+              <button
+                onClick={() => setIsSidebarCollapsed(!isSidebarCollapsed)}
+                className="absolute top-6 left-6 p-2.5 bg-white border border-slate-200/80 rounded-xl text-slate-500 hover:text-slate-800 hover:bg-slate-50 transition cursor-pointer shadow-3xs hover:shadow-2xs active:scale-95 text-xs font-bold"
+                title={isSidebarCollapsed ? "Mostrar menú lateral" : "Ocultar menú lateral"}
+              >
+                {isSidebarCollapsed ? "▶" : "◀"}
+              </button>
+
+              {/* Center aligned Apple-style Minimal Ingestion Card */}
+              <div className="max-w-xl w-full bg-white border border-slate-200/80 rounded-3xl p-8 md:p-10 shadow-sm flex flex-col gap-6 animate-fade-in">
               <div className="text-center space-y-1.5">
                 <span className="text-[10px] font-bold uppercase text-indigo-600 tracking-widest bg-indigo-50 border border-indigo-100 px-3 py-1 rounded-full">
                   PLAUD Corporate Intelligence
@@ -2184,6 +2423,42 @@ This workspace was custom-curated in **⚡ Turbo Fast-Track Mode** to bypass bro
                 <p className="text-xs text-slate-500 leading-relaxed font-sans max-w-sm mx-auto">
                   Sube tus archivos multimedia o de texto para que la IA realice una transcripción diarizada y un resumen ejecutivo estructurado.
                 </p>
+              </div>
+
+              {/* Premium Processing Mode Toggle */}
+              <div className="bg-slate-50 border border-slate-100 p-3.5 rounded-2xl flex items-center justify-between gap-4 font-sans text-xs">
+                <div className="space-y-0.5 text-left">
+                  <span className="font-extrabold text-slate-800 text-[11px] block">Modo de Procesamiento IA</span>
+                  <p className="text-[10px] text-slate-500 leading-tight">
+                    {processingMode === "turbo" 
+                      ? "⚡ Turbo: un solo paso de Gemini (10-15s, asíncrono, sin timeouts)" 
+                      : "🎯 Alta Fidelidad: diarización premium por oradores (STT + LLM)"}
+                  </p>
+                </div>
+                <div className="flex bg-slate-200/60 p-0.5 rounded-lg border border-slate-200 gap-0.5 shrink-0">
+                  <button
+                    type="button"
+                    onClick={() => setProcessingMode("high-fidelity")}
+                    className={`px-2.5 py-1 text-[10px] font-bold rounded-md transition duration-150 cursor-pointer ${
+                      processingMode === "high-fidelity" 
+                        ? "bg-slate-900 text-white shadow-3xs" 
+                        : "text-slate-500 hover:text-slate-700"
+                    }`}
+                  >
+                    🎯 Hi-Fi
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setProcessingMode("turbo")}
+                    className={`px-2.5 py-1 text-[10px] font-bold rounded-md transition duration-150 cursor-pointer ${
+                      processingMode === "turbo" 
+                        ? "bg-slate-900 text-white shadow-3xs" 
+                        : "text-slate-500 hover:text-slate-700"
+                    }`}
+                  >
+                    ⚡ Turbo
+                  </button>
+                </div>
               </div>
 
               {/* Sub-tab selection hooks */}
@@ -2382,6 +2657,8 @@ This workspace was custom-curated in **⚡ Turbo Fast-Track Mode** to bypass bro
               )}
 
             </div>
+
+          </div>
 
           </section>
         )}

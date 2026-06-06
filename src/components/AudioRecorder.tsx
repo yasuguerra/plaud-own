@@ -2,7 +2,7 @@ import React, { useState, useRef, useEffect } from "react";
 import { Mic, Square, Play, Trash2, CheckCircle2, AlertCircle } from "lucide-react";
 
 interface AudioRecorderProps {
-  onAudioReady: (base64Data: string, mimeType: string, durationSec: number, localUrl?: string) => void;
+  onAudioReady: (file: File, durationSec: number, localUrl?: string) => void;
   isProcessing: boolean;
 }
 
@@ -77,15 +77,9 @@ export default function AudioRecorder({ onAudioReady, isProcessing }: AudioRecor
         // Terminate mic stream tracks
         stream.getTracks().forEach((track) => track.stop());
 
-        // Convert Blob to Base64
-        const reader = new FileReader();
-        reader.readAsDataURL(audioBlob);
-        reader.onloadend = () => {
-          const resultBase64 = reader.result as string;
-          // Extract base64 payload out of DataURL (strips headers like "data:audio/webm;base64,")
-          const base64Data = resultBase64.split(",")[1];
-          onAudioReady(base64Data, mimeType, recordingTimeRef.current, url);
-        };
+        const ext = mimeType.includes("mp4") ? "mp4" : mimeType.includes("ogg") ? "ogg" : mimeType.includes("wav") ? "wav" : "webm";
+        const file = new File([audioBlob], `mic_recording_${Date.now()}.${ext}`, { type: mimeType });
+        onAudioReady(file, recordingTimeRef.current, url);
       };
 
       mediaRecorder.start(250); // Slice every 250ms
