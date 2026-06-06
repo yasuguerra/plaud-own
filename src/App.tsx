@@ -1069,7 +1069,7 @@ This workspace was custom-curated in **⚡ Turbo Fast-Track Mode** to bypass bro
       const newList = [completedSession, ...sessions];
       saveSessions(newList);
       setActiveSessionId(completedSession.id);
-      setActiveTab("transcript");
+      setActiveTab("summary");
 
       if (completedSession.status === "processing") {
         setProcessingStatus({ stage: "completed", progress: 100, message: "Archivo subido con éxito, procesando de fondo..." });
@@ -1430,7 +1430,7 @@ This workspace was custom-curated in **⚡ Turbo Fast-Track Mode** to bypass bro
       const updatedSessionWithModel = { ...updatedSessionWithUser, chatHistory: [...stagedHistory, newModelMsg] };
       saveSessions(sessions.map(s => s.id === activeSession.id ? updatedSessionWithModel : s));
     } catch (err) {
-      console.error("Failed to query AI from MindMapCanvas:", err);
+      console.error("Failed to query AI:", err);
     }
   };
 
@@ -1777,8 +1777,10 @@ This workspace was custom-curated in **⚡ Turbo Fast-Track Mode** to bypass bro
             <div className="bg-white rounded-2xl border border-slate-200 p-8 shadow-sm flex flex-col items-center justify-center text-center max-w-sm w-full space-y-4">
               <Loader2 className="h-8 w-8 animate-spin text-indigo-600" />
               <div className="space-y-1">
-                <h3 className="font-display font-bold text-base text-slate-800">Compiling Corporate Briefing</h3>
-                <p className="text-[9px] text-slate-400 font-mono uppercase tracking-wider">Stage: {processingStatus.stage}</p>
+                <h3 className="font-display font-bold text-base text-slate-800 font-sans">
+                  {processingStatus.stage === "uploading" ? "Subiendo Archivo de Audio..." : "Compilando Informe de Reunión..."}
+                </h3>
+                <p className="text-[9px] text-slate-400 font-mono uppercase tracking-wider">Etapa: {processingStatus.stage}</p>
               </div>
               <div className="w-full bg-slate-100 rounded-full h-1 overflow-hidden">
                 <div className="bg-indigo-600 h-full transition-all duration-350" style={{ width: `${processingStatus.progress}%` }} />
@@ -1839,18 +1841,12 @@ This workspace was custom-curated in **⚡ Turbo Fast-Track Mode** to bypass bro
                   {/* Key Progress Metrics */}
                   <div>
                     <h2 className="text-[10px] font-bold uppercase text-slate-400 tracking-wider mb-2">Progreso General</h2>
-                    <div className="grid grid-cols-2 gap-2 mt-1.5">
+                    <div className="mt-1.5">
                       <div className="bg-slate-50 border border-slate-100 p-3 rounded-lg text-center shadow-3xs">
                         <span className="block text-lg font-bold text-indigo-600">
                           {activeSession.actionItems.filter(t => t.completed).length}/{activeSession.actionItems.length}
                         </span>
-                        <span className="text-[9px] text-slate-400 font-bold uppercase">Objetivos</span>
-                      </div>
-                      <div className="bg-slate-50 border border-slate-100 p-3 rounded-lg text-center shadow-3xs">
-                        <span className="block text-lg font-bold text-slate-700">
-                          {activeSession.flashcards.filter(c => c.learned).length}/{activeSession.flashcards.length}
-                        </span>
-                        <span className="text-[9px] text-slate-400 font-bold uppercase">Repaso</span>
+                        <span className="text-[9px] text-slate-400 font-bold uppercase">Objetivos de Reunión</span>
                       </div>
                     </div>
                   </div>

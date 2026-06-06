@@ -21,6 +21,29 @@ import speech from "@google-cloud/speech";
 
 const execPromise = promisify(exec);
 
+const LOG_FILE_PATH = path.join(process.cwd(), "logs", "platform.log");
+
+export function logToPlatform(message: string, level: string = "INFO") {
+  const timestamp = new Date().toISOString();
+  const formattedMessage = `[${timestamp}] [${level}] ${message}\n`;
+  
+  if (level === "ERROR" || level === "WARN") {
+    console.error(formattedMessage.trim());
+  } else {
+    console.log(formattedMessage.trim());
+  }
+
+  try {
+    const dir = path.dirname(LOG_FILE_PATH);
+    if (!fs.existsSync(dir)) {
+      fs.mkdirSync(dir, { recursive: true });
+    }
+    fs.appendFileSync(LOG_FILE_PATH, formattedMessage);
+  } catch (err: any) {
+    console.error(`[LOG FILE ERROR] Failed to write to platform.log:`, err.message || err);
+  }
+}
+
 // Explicitly override host environment variables with .env configuration
 try {
   if (dotenv && typeof (dotenv as any).config === "function") {
@@ -354,7 +377,7 @@ const firestore = new FailSafeFirestore();
 // Helper to log operations and update progress for a session
 async function logToSession(sessionId: string, stage: string, message: string, progress: number) {
   const timestamp = new Date().toISOString();
-  console.log(`[SESSION LOG][${sessionId}][${stage}] (${progress}%): ${message}`);
+  logToPlatform(`[SESSION LOG][${sessionId}][${stage}] (${progress}%): ${message}`, "INFO");
   try {
     const docRef = firestore.collection("sessions").doc(sessionId);
     const doc = await docRef.get();
@@ -365,7 +388,7 @@ async function logToSession(sessionId: string, stage: string, message: string, p
       await docRef.update({ logs, progress });
     }
   } catch (err: any) {
-    console.error(`[SESSION LOG ERROR] Failed to write log for session ${sessionId}:`, err.message || err);
+    logToPlatform(`[SESSION LOG ERROR] Failed to write log for session ${sessionId}: ${err.message || err}`, "ERROR");
   }
 }
 
@@ -619,6 +642,9 @@ async function executeAudioProcessing(
   sessionId: string,
   processingMode?: string
 ): Promise<{ parsedStudySession: any; finalTranscript: string; gcsUri: string; geminiFileUri: string }> {
+  const resolvedMime = resolveMimeType(fileName, mimeType);
+  logToPlatform(`[PIPELINE START] Processing session: ${sessionId}. File: "${fileName}", MIME: ${mimeType} -> resolved to: ${resolvedMime}, size: ${fs.existsSync(localFilePath) ? Math.round(fs.statSync(localFilePath).size / 1024 / 1024) : 0}MB`, "INFO");
+
   let gcsUri = "";
   let geminiFileUri = "";
   let finalTranscript = "";
@@ -626,7 +652,7 @@ async function executeAudioProcessing(
 
   try {
     // 1. Upload original file to Cloud Storage (GCS) as permanent backup and playback source
-    const uploadMime = mimeType;
+    const uploadMime = resolvedMime;
     const uploadName = fileName;
     const gcsDestination = `audios/${sessionId}_${uploadName}`;
 
@@ -659,10 +685,10 @@ async function executeAudioProcessing(
           }
         });
         geminiFileUri = fileRef.uri || "";
-        console.log(`[PIPELINE] Gemini Files upload successful: ${geminiFileUri}`);
+        logToPlatform(`[PIPELINE][${sessionId}] Gemini Files API upload successful for file "${uploadName}" (${uploadMime}): ${geminiFileUri}`, "INFO");
         await logToSession(sessionId, "UPLOAD", "Archivo cargado en la API de Archivos de Gemini de forma segura.", 50);
-      } catch (uploadErr) {
-        console.error("[PIPELINE] Failed to upload file to Gemini Files API:", uploadErr);
+      } catch (uploadErr: any) {
+        logToPlatform(`[PIPELINE ERROR][${sessionId}] Failed to upload file "${uploadName}" to Gemini Files API with mimeType "${uploadMime}": ${uploadErr?.stack || uploadErr?.message || uploadErr}`, "ERROR");
         await logToSession(sessionId, "UPLOAD", "Falla en carga a API de Archivos, preparando inlineData Base64.", 50);
       }
     } else {
@@ -884,7 +910,7 @@ const PORT = Number(process.env.PORT) || 3000;
 
 // Configure multer to store uploaded files in /tmp/
 const upload = multer({
-  dest: "/tmp/",
+  dest: os.tmpdir(),
   limits: {
     fileSize: 150 * 1024 * 1024, // High-capacity 150MB support for big audio/video/documents
   },
@@ -1067,6 +1093,36 @@ export function getExtensionFromMimeType(mimeType: string, defaultExt: string = 
   if (m.includes("text/plain")) return "txt";
   if (m.includes("csv")) return "csv";
   return defaultExt;
+}
+
+export function resolveMimeType(fileName: string, mimeType: string): string {
+  if (!fileName) return mimeType || "application/octet-stream";
+  const ext = fileName.split('.').pop()?.toLowerCase();
+  
+  // If the browser or multer provided a generic or empty mime type, try to resolve from extension
+  if (!mimeType || mimeType === "application/octet-stream" || mimeType === "binary/octet-stream") {
+    switch (ext) {
+      case "mp3": return "audio/mp3";
+      case "wav": return "audio/wav";
+      case "ogg": return "audio/ogg";
+      case "m4a": return "audio/m4a";
+      case "webm": return "audio/webm";
+      case "aac": return "audio/aac";
+      case "mp4": return "video/mp4";
+      case "pdf": return "application/pdf";
+      case "txt": return "text/plain";
+      case "md": return "text/markdown";
+      case "csv": return "text/csv";
+      case "json": return "application/json";
+    }
+  }
+
+  // Ensure standard audio ogg MIME type
+  if (ext === "ogg" && (!mimeType.includes("audio") && !mimeType.includes("video"))) {
+    return "audio/ogg";
+  }
+
+  return mimeType || "application/octet-stream";
 }
 
 function getFallbackChatResponse(message: string, history: any[], contextSubject?: string, contextSummary?: string): string {
@@ -1405,7 +1461,7 @@ ${contextSummary || "User has not uploaded or generated any material yet. Encour
 PROTECTORES ABSOLUTOS DE ANTI-ALUCINACIÓN (CRITICAL GROUNDING CONSTRAINTS):
 1. Rely EXCLUSIVELY on the provided transcript and summary text above. Never invent, assume, extrapolate, or estimate decisions, dates, tasks, speakers, agreements, sales figures, revenue, or outcomes not explicitly and literally stated in the context.
 2. If the user asks a question about the meeting that cannot be answered, verified, or proven using the provided material, you MUST respond EXACTLY with a polite, clear refusal in Spanish stating that this information was not discussed in the meeting:
-   "Lo siento, esta información no fue discutida en la reunión. De acuerdo con el registro oficial de la conversación, no se mencionan detalles sobre este tema."
+   "No se puede validar esta información ya que no fue mencionada en la reunión."
 3. Do not try to guess, assume, or generalize. If a topic (such as sales, marketing, engineering, dates, numbers) is not discussed or is only partially mentioned, state exactly what is known or state that it is not available.
 4. Keep all responses strictly grounded in facts. If you are asked about something outside the meeting scope, remind the user that you are only authorized to discuss the contents of the official transcript.
 5. Always respond in the same language as the user's query (Spanish by default).
@@ -1698,7 +1754,7 @@ app.post("/api/process", async (req, res) => {
         ${sampleLectureContent}
         === END LECTURE MATERIAL STATEMENTS ===
         
-        Make sure the mindMap structure is complete, featuring colorful, helpful levels of root topic, sub-topic, and subtopic children details.`
+        Ensure you extract ALL goals, commits, targets, and objectives discussed in the material (do not skip any detail).`
       }];
 
       console.log("[SAMPLE PROCESS] Generating study companion from Gemini for topic:", topicTitle);
@@ -1751,7 +1807,7 @@ app.post("/api/process", async (req, res) => {
         return;
       }
 
-      const cleanMime = mimeType.split(";")[0].trim();
+      const resolvedMime = resolveMimeType(mediaName || "", mimeType.split(";")[0].trim());
       const rawSizeBytes = Math.round(base64Data.length * 0.75);
       const sessionId = "sess_" + Date.now().toString(36);
 
@@ -1787,13 +1843,13 @@ app.post("/api/process", async (req, res) => {
 
       // Trigger background worker
       (async () => {
-        const ext = getExtensionFromMimeType(cleanMime, "webm");
-        const tempFilePath = path.join("/tmp", `${sessionId}_mic.${ext}`);
+        const ext = getExtensionFromMimeType(resolvedMime, "webm");
+        const tempFilePath = path.join(os.tmpdir(), `${sessionId}_mic.${ext}`);
         try {
           fs.writeFileSync(tempFilePath, Buffer.from(base64Data, "base64"));
           await processAudioPipeline(
             tempFilePath,
-            cleanMime,
+            resolvedMime,
             mediaName || `Recording_${sessionId}.${ext}`,
             mediaType || "audio",
             selectedTemplate,
@@ -1872,8 +1928,8 @@ app.post("/api/upload-file", upload.single("file"), async (req, res) => {
     const mimeType = file.mimetype || "";
     const tempFilePath = file.path;
 
-    const cleanMime = mimeType.split(";")[0].trim();
-    console.log(`[MULTIPART UPLOAD] processing: Name: ${mediaName}, Mime: ${mimeType} (cleaned: ${cleanMime}), Size: ${Math.round(file.size / 1024 / 1024)}MB`);
+    const resolvedMime = resolveMimeType(mediaName, mimeType.split(";")[0].trim());
+    logToPlatform(`[MULTIPART UPLOAD] processing: Name: "${mediaName}", Mime: ${mimeType} -> resolved to: ${resolvedMime}, Size: ${Math.round(file.size / 1024 / 1024)}MB`, "INFO");
 
     const userId = (req.headers["x-user-id"] || "guest") as string;
 
@@ -1921,14 +1977,14 @@ app.post("/api/upload-file", upload.single("file"), async (req, res) => {
     // Trigger background worker
     (async () => {
       try {
-        const isPlainText = cleanMime.startsWith("text/") || mediaName.endsWith(".txt") || mediaName.endsWith(".md") || mediaName.endsWith(".csv") || mediaName.endsWith(".json");
-        const isPDF = cleanMime.includes("pdf") || mediaName.endsWith(".pdf");
+        const isPlainText = resolvedMime.startsWith("text/") || mediaName.endsWith(".txt") || mediaName.endsWith(".md") || mediaName.endsWith(".csv") || mediaName.endsWith(".json");
+        const isPDF = resolvedMime.includes("pdf") || mediaName.endsWith(".pdf");
 
         if (!isPlainText && !isPDF) {
           // Audio or Video: delegate to our new processAudioPipeline
           await processAudioPipeline(
             tempFilePath,
-            cleanMime,
+            resolvedMime,
             mediaName,
             mediaType || "audio",
             selectedTemplate,
@@ -1947,7 +2003,7 @@ app.post("/api/upload-file", upload.single("file"), async (req, res) => {
             if (isDeveloperApiMode()) {
               console.log("[UPLOAD-FILE BG] Developer API mode: routing file through the Gemini Files API...");
             } else {
-              gcsUri = await uploadToGCS(tempFilePath, gcsDestination, cleanMime);
+              gcsUri = await uploadToGCS(tempFilePath, gcsDestination, resolvedMime);
             }
           } catch (gcsErr) {
             console.warn("[GCS WARNING BG] Failed to upload to GCS, falling back to Gemini Files API:", gcsErr);
@@ -1965,7 +2021,7 @@ app.post("/api/upload-file", upload.single("file"), async (req, res) => {
               ${textContent}
               === END DOCUMENT CONTENT ===
               
-              Make sure the mindMap structure is complete, featuring colorful, helpful levels of root topic, sub-topic, and subtopic children details.`
+              Ensure you extract ALL goals, commits, targets, and objectives discussed in the material (do not skip any detail).`
             }];
           } else {
             // PDF
@@ -1974,7 +2030,7 @@ app.post("/api/upload-file", upload.single("file"), async (req, res) => {
               const fileRef = await ai.files.upload({
                 file: tempFilePath,
                 config: {
-                  mimeType: cleanMime,
+                  mimeType: resolvedMime,
                   displayName: mediaName,
                 }
               });
@@ -1989,7 +2045,7 @@ app.post("/api/upload-file", upload.single("file"), async (req, res) => {
               {
                 fileData: {
                   fileUri: gcsUri || geminiFileUri,
-                  mimeType: cleanMime,
+                  mimeType: resolvedMime,
                 }
               },
               {
@@ -1999,13 +2055,11 @@ app.post("/api/upload-file", upload.single("file"), async (req, res) => {
                 1. An academic and professional title.
                 2. A beautiful detailed summary/resume in formatted Markdown based on the template layout: "${selectedTemplate.name}".
                 3. A complete timestamped narrative transcript or detailed chapter layout.
-                4. Structured follow-up Action Items.
-                5. A highly descriptive Mind Map concept hierarchy matching the MindMapNode schema structure.
-                6. Five to seven highly engaging study flashcards testing main concept outcomes.
+                4. Structured follow-up Action Items. Ensure you extract ALL targets, decisions, commitments, and objectives discussed (no skimping!).
                 
                 Generate fully populated and valid results in JSON format according to the supplied responseSchema.${speakerContext}
                 
-                CRITICAL REQUIREMENT: You MUST automatically detect the language written in the source document (e.g. Spanish, English). All generated text fields (title, summary, transcript, actionItems, mindMap, flashcards) MUST be entirely in that detected language.`
+                CRITICAL REQUIREMENT: You MUST automatically detect the language written in the source document (e.g. Spanish, English). All generated text fields (title, summary, transcript, actionItems) MUST be entirely in that detected language.`
               }
             ];
           }
@@ -2086,15 +2140,19 @@ app.post("/api/upload-chunk", upload.single("chunk"), async (req, res) => {
     const { uploadId, chunkIndex } = req.body;
 
     if (!file) {
+      logToPlatform("[CHUNK UPLOAD ERROR] No chunk file received.", "WARN");
       res.status(400).json({ error: "No chunk file received." });
       return;
     }
     if (!uploadId || chunkIndex === undefined) {
+      logToPlatform(`[CHUNK UPLOAD ERROR] Missing uploadId (${uploadId}) or chunkIndex (${chunkIndex}).`, "WARN");
       res.status(400).json({ error: "Missing uploadId or chunkIndex." });
       return;
     }
 
-    const chunkDir = path.join("/tmp", "chunks", uploadId);
+    logToPlatform(`[CHUNK RECEIVED] uploadId: ${uploadId}, chunkIndex: ${chunkIndex}, size: ${Math.round(file.size / 1024)}KB`, "INFO");
+
+    const chunkDir = path.join(os.tmpdir(), "chunks", uploadId);
     if (!fs.existsSync(chunkDir)) {
       fs.mkdirSync(chunkDir, { recursive: true });
     }
@@ -2105,12 +2163,12 @@ app.post("/api/upload-chunk", upload.single("chunk"), async (req, res) => {
     try {
       fs.unlinkSync(file.path);
     } catch (e) {
-      console.warn("Failed to clean up transient multer chunk:", e);
+      logToPlatform(`[CHUNK CLEANUP WARNING] Failed to clean up transient multer chunk: ${e}`, "WARN");
     }
 
     res.json({ success: true, chunkIndex: parseInt(chunkIndex, 10) });
   } catch (err: any) {
-    console.error("[CHUNK UPLOAD ERROR]:", err);
+    logToPlatform(`[CHUNK UPLOAD EXCEPTION] uploadId: ${req.body?.uploadId || "unknown"}, chunkIndex: ${req.body?.chunkIndex || "unknown"}: ${err?.stack || err?.message || err}`, "ERROR");
     res.status(500).json({ error: err.message || "Failed to upload chunk." });
   }
 });
@@ -2121,16 +2179,18 @@ app.post("/api/merge-chunks", async (req, res) => {
     const { uploadId, fileName, mediaType, mimeType, totalChunks, templateId, processingMode } = req.body;
 
     if (!uploadId || !fileName || totalChunks === undefined) {
+      logToPlatform("[MERGE CHUNKS ERROR] Missing merge parameters: uploadId, fileName, or totalChunks.", "WARN");
       res.status(400).json({ error: "Missing merge parameters: uploadId, fileName, or totalChunks." });
       return;
     }
 
+    const resolvedMime = resolveMimeType(fileName, mimeType);
     const userId = (req.headers["x-user-id"] || "guest") as string;
 
-    const chunkDir = path.join("/tmp", "chunks", uploadId);
-    const mergedFilePath = path.join("/tmp", `${uploadId}_${fileName}`);
+    const chunkDir = path.join(os.tmpdir(), "chunks", uploadId);
+    const mergedFilePath = path.join(os.tmpdir(), `${uploadId}_${fileName}`);
 
-    console.log(`[MERGE START] id: ${uploadId}, name: ${fileName}, pieces: ${totalChunks}`);
+    logToPlatform(`[MERGE START] id: ${uploadId}, name: "${fileName}", MIME: ${mimeType} -> resolved to: ${resolvedMime}, pieces: ${totalChunks}, user: ${userId}`, "INFO");
 
     // Reassemble files sequentially
     const writeStream = fs.createWriteStream(mergedFilePath);
@@ -2172,8 +2232,8 @@ app.post("/api/merge-chunks", async (req, res) => {
       console.warn("Warning: Chunk assets garbage collection failed:", cleanupErr);
     }
 
-    const isPlainText = mimeType.startsWith("text/") || fileName.endsWith(".txt") || fileName.endsWith(".md") || fileName.endsWith(".csv") || fileName.endsWith(".json");
-    const isPDF = mimeType.includes("pdf") || fileName.endsWith(".pdf");
+    const isPlainText = resolvedMime.startsWith("text/") || fileName.endsWith(".txt") || fileName.endsWith(".md") || fileName.endsWith(".csv") || fileName.endsWith(".json");
+    const isPDF = resolvedMime.includes("pdf") || fileName.endsWith(".pdf");
 
     // Fetch user speaker profiles and selected template definitions
     const speakerContext = await getUserSpeakerContext(userId);
@@ -2203,7 +2263,7 @@ app.post("/api/merge-chunks", async (req, res) => {
       ]
     };
 
-    console.log(`[ASYNC MERGE] Saving initial processing placeholder session: ${sessionId}`);
+    logToPlatform(`[ASYNC MERGE] Saving initial processing placeholder session: ${sessionId}`, "INFO");
     await firestore.collection("sessions").doc(sessionId).set(initialSession);
 
     // Immediately return the 202 status and placeholder object to the client
@@ -2216,7 +2276,7 @@ app.post("/api/merge-chunks", async (req, res) => {
           // Audio or Video: delegate to processAudioPipeline
           await processAudioPipeline(
             mergedFilePath,
-            mimeType,
+            resolvedMime,
             fileName,
             mediaType || "audio",
             selectedTemplate,
@@ -2232,12 +2292,12 @@ app.post("/api/merge-chunks", async (req, res) => {
           let gcsUri = "";
           try {
             if (isDeveloperApiMode()) {
-              console.log("[MERGE-CHUNKS BG] Developer API mode: routing reassembled file through the Gemini Files API...");
+              logToPlatform(`[MERGE-CHUNKS BG] Developer API mode: routing reassembled file through the Gemini Files API...`, "INFO");
             } else {
-              gcsUri = await uploadToGCS(mergedFilePath, gcsDestination, mimeType || "");
+              gcsUri = await uploadToGCS(mergedFilePath, gcsDestination, resolvedMime || "");
             }
-          } catch (gcsErr) {
-            console.warn("[GCS WARNING BG] Failed to upload reassembled file to GCS:", gcsErr);
+          } catch (gcsErr: any) {
+            logToPlatform(`[GCS WARNING BG] Failed to upload reassembled file to GCS: ${gcsErr?.message || gcsErr}`, "WARN");
           }
 
           const ai = getGeminiClient();
@@ -2248,8 +2308,8 @@ app.post("/api/merge-chunks", async (req, res) => {
             const textContent = fs.readFileSync(mergedFilePath, "utf8");
             try {
               fs.unlinkSync(mergedFilePath);
-            } catch (err) {
-              console.error("Failed to delete assembled text file:", err);
+            } catch (err: any) {
+              logToPlatform(`Failed to delete assembled text file: ${err?.message || err}`, "WARN");
             }
 
             contentsPayload = [{
@@ -2259,24 +2319,24 @@ app.post("/api/merge-chunks", async (req, res) => {
               ${textContent}
               === END DOCUMENT CONTENT ===
               
-              Make sure the mindMap structure is complete, featuring colorful, helpful levels of root topic, sub-topic, and subtopic children details.`
+              Ensure you extract ALL goals, commits, targets, and objectives discussed in the material (do not skip any detail).`
             }];
           } else {
             // PDF
             if (!gcsUri) {
-              console.log("[MERGE-CHUNKS BG FALLBACK] GCS Upload failed or empty. Attempting Gemini Files API upload...");
+              logToPlatform(`[MERGE-CHUNKS BG FALLBACK] GCS Upload failed or empty. Attempting Gemini Files API upload...`, "INFO");
               try {
                 const fileRef = await ai.files.upload({
                   file: mergedFilePath,
                   config: {
-                    mimeType: mimeType || "",
+                    mimeType: resolvedMime || "",
                     displayName: fileName,
                   }
                 });
                 geminiFileUri = fileRef.uri || "";
-                console.log(`[MERGE-CHUNKS BG FALLBACK] Gemini Files upload successful: ${geminiFileUri}`);
+                logToPlatform(`[MERGE-CHUNKS BG FALLBACK] Gemini Files upload successful: ${geminiFileUri}`, "INFO");
               } catch (geminiErr: any) {
-                console.error("[MERGE-CHUNKS BG FALLBACK ERROR] Gemini Files upload failed:", geminiErr);
+                logToPlatform(`[MERGE-CHUNKS BG FALLBACK ERROR] Gemini Files upload failed: ${geminiErr?.message || geminiErr}`, "ERROR");
                 throw geminiErr;
               }
             }
@@ -2300,7 +2360,7 @@ app.post("/api/merge-chunks", async (req, res) => {
               {
                 fileData: {
                   fileUri: gcsUri || geminiFileUri,
-                  mimeType: mimeType,
+                  mimeType: resolvedMime,
                 }
               },
               {
@@ -2310,13 +2370,11 @@ app.post("/api/merge-chunks", async (req, res) => {
                 1. An academic and professional title.
                 2. A beautiful detailed summary/resume in formatted Markdown based on the template layout: "${selectedTemplate.name}".
                 3. A complete timestamped narrative transcript or detailed chapter layout.
-                4. Structured follow-up Action Items.
-                5. A highly descriptive Mind Map concept hierarchy matching the MindMapNode schema structure.
-                6. Five to seven highly engaging study flashcards testing main concept outcomes.
+                4. Structured follow-up Action Items. Ensure you extract ALL targets, decisions, commitments, and objectives discussed (no skimping!).
                 
                 Generate fully populated and valid results in JSON format according to the supplied responseSchema.${speakerContext}
                 
-                CRITICAL REQUIREMENT: You MUST automatically detect the language spoken or written in the source audio/video/document (e.g. Spanish, English). All generated text fields (title, summary, transcript, actionItems, mindMap, flashcards) MUST be entirely in that detected language.`
+                CRITICAL REQUIREMENT: You MUST automatically detect the language spoken or written in the source audio/video/document (e.g. Spanish, English). All generated text fields (title, summary, transcript, actionItems) MUST be entirely in that detected language.`
               }
             ];
           }
@@ -2385,6 +2443,28 @@ app.post("/api/merge-chunks", async (req, res) => {
     console.warn("[CHUNK ASSEMBLY PROCESS ERROR] Failed to process reassembled file:", error);
     const classified = classifyError(error);
     res.status(classified.errorType === "AUTH" ? 401 : 500).json(classified);
+  }
+});
+
+app.get("/api/platform-logs", async (req, res, next) => {
+  try {
+    if (!fs.existsSync(LOG_FILE_PATH)) {
+      res.json({ logs: "" });
+      return;
+    }
+    // Read last 1MB of logs so it doesn't crash on huge files
+    const stats = fs.statSync(LOG_FILE_PATH);
+    const maxReadBytes = 1 * 1024 * 1024; // 1MB
+    const startByte = Math.max(0, stats.size - maxReadBytes);
+    const fd = fs.openSync(LOG_FILE_PATH, "r");
+    const buffer = Buffer.alloc(Math.min(stats.size, maxReadBytes));
+    fs.readSync(fd, buffer, 0, buffer.length, startByte);
+    fs.closeSync(fd);
+    
+    res.json({ logs: buffer.toString("utf8") });
+  } catch (error: any) {
+    console.error("[LOGS ENDPOINT ERROR] Failed to retrieve platform logs:", error);
+    next(error);
   }
 });
 
