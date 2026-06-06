@@ -619,93 +619,123 @@ async function executeAudioProcessing(
   sessionId: string,
   processingMode?: string
 ): Promise<{ parsedStudySession: any; finalTranscript: string; gcsUri: string; geminiFileUri: string }> {
-  const tempWavPath = path.join("/tmp", `${sessionId}_transcoded.wav`);
-  let transcodedSuccessfully = false;
   let gcsUri = "";
   let geminiFileUri = "";
   let finalTranscript = "";
   let processedFilePath = localFilePath;
-  const isTurbo = processingMode === "turbo";
 
   try {
-    // 1. Check if we need transcoding (skipped entirely in Turbo Mode)
-    const isAudioOrVideo = mimeType.startsWith("audio/") || mimeType.startsWith("video/") || mimeType.includes("ogg") || mimeType.includes("webm") || mimeType.includes("mp4") || mimeType.includes("mpeg") || mimeType.includes("m4a") || mimeType.includes("wav");
-
-    if (isAudioOrVideo && !isTurbo) {
-      // Transcode using ffmpeg
-      await logToSession(sessionId, "TRANSCODE", "Iniciando transcodificación de formato con FFMPEG...", 10);
-      const ok = await transcodeToWav(localFilePath, tempWavPath);
-      if (ok) {
-        processedFilePath = tempWavPath;
-        transcodedSuccessfully = true;
-        await logToSession(sessionId, "TRANSCODE", "Transcodificación completada a formato PCM lineal de 16kHz mono WAV.", 20);
-      } else {
-        console.warn("[PIPELINE WARNING] Transcoding failed. Falling back to raw file.");
-        await logToSession(sessionId, "TRANSCODE", "FFMPEG no disponible en el host. Omitiendo transcodificación y procediendo con el archivo original.", 20);
-      }
-    } else if (isAudioOrVideo && isTurbo) {
-      await logToSession(sessionId, "TRANSCODE", "Modo Turbo activado: se omitió el paso de transcodificación de audio.", 20);
-    }
-
-    // 2. Upload to GCS or Gemini Files API
-    const uploadMime = transcodedSuccessfully ? "audio/wav" : mimeType;
-    const uploadName = transcodedSuccessfully ? `${path.basename(fileName, path.extname(fileName))}.wav` : fileName;
+    // 1. Upload original file to Cloud Storage (GCS) as permanent backup and playback source
+    const uploadMime = mimeType;
+    const uploadName = fileName;
     const gcsDestination = `audios/${sessionId}_${uploadName}`;
 
     try {
-      await logToSession(sessionId, "UPLOAD", "Subiendo archivo de audio a almacenamiento en la nube (GCS)...", 30);
+      await logToSession(sessionId, "UPLOAD", "Subiendo archivo de audio original a GCS...", 15);
       gcsUri = await uploadToGCS(processedFilePath, gcsDestination, uploadMime);
       if (gcsUri) {
-        await logToSession(sessionId, "UPLOAD", `Subida en la nube completada con éxito.`, 40);
+        await logToSession(sessionId, "UPLOAD", `Subida en GCS completada con éxito.`, 30);
       } else {
-        await logToSession(sessionId, "UPLOAD", "La subida directa a GCS falló, preparando fallback asíncrono.", 40);
+        await logToSession(sessionId, "UPLOAD", "La subida directa a GCS falló, procediendo con la API de Archivos de Gemini.", 30);
       }
     } catch (gcsErr: any) {
       console.warn("[PIPELINE GCS WARNING] GCS upload failed, falling back to Gemini Files API:", gcsErr);
-      await logToSession(sessionId, "UPLOAD", "La subida directa a GCS falló, utilizando fallback asíncrono.", 40);
+      await logToSession(sessionId, "UPLOAD", "La subida directa a GCS falló, procediendo con la API de Archivos de Gemini.", 30);
     }
 
     const ai = getGeminiClient();
 
-    // 3. Transcription Phase (Speech-to-Text Chirp 2) - skipped in Turbo Mode or when raw format is unsupported
-    const isSTTSupportedRawFormat = !isTurbo && (
-      transcodedSuccessfully || 
-      mimeType.includes("ogg") || 
-      mimeType.includes("mp3") || 
-      mimeType.includes("mpeg") || 
-      fileName.endsWith(".mp3") || 
-      fileName.endsWith(".ogg")
-    );
-
-    let sttSuccess = false;
-    if (gcsUri && isSTTSupportedRawFormat) {
+    // 2. Upload file to Gemini Files API (Required for Developer API mode where gs:// is not natively supported,
+    // and excellent for native large file streaming/multimodal processing in all modes!)
+    if (isDeveloperApiMode() || !gcsUri) {
+      console.log("[PIPELINE] Uploading file to Gemini Files API...");
+      await logToSession(sessionId, "UPLOAD", "Subiendo archivo a la API de Archivos de Gemini para análisis nativo...", 40);
       try {
-        await logToSession(sessionId, "STT_API", "Iniciando transcripción por oradores con Google Speech-to-Text V1...", 50);
-        finalTranscript = await transcribeAudioWithChirp2(gcsUri, mimeType, transcodedSuccessfully);
-        sttSuccess = true;
-        await logToSession(sessionId, "STT_API", `Transcripción dedicada completada con éxito.`, 70);
-      } catch (sttErr: any) {
-        console.error("[PIPELINE STT ERROR] Speech-to-Text failed, falling back to single-pass Gemini:", sttErr);
-        await logToSession(sessionId, "STT_API", "La transcripción dedicada falló o no está configurada, utilizando fallback de Gemini.", 70);
+        const fileRef = await ai.files.upload({
+          file: processedFilePath,
+          config: {
+            mimeType: uploadMime,
+            displayName: uploadName,
+          }
+        });
+        geminiFileUri = fileRef.uri || "";
+        console.log(`[PIPELINE] Gemini Files upload successful: ${geminiFileUri}`);
+        await logToSession(sessionId, "UPLOAD", "Archivo cargado en la API de Archivos de Gemini de forma segura.", 50);
+      } catch (uploadErr) {
+        console.error("[PIPELINE] Failed to upload file to Gemini Files API:", uploadErr);
+        await logToSession(sessionId, "UPLOAD", "Falla en carga a API de Archivos, preparando inlineData Base64.", 50);
       }
-    } else if (gcsUri && !isSTTSupportedRawFormat) {
-      if (isTurbo) {
-        await logToSession(sessionId, "STT_API", "Modo Turbo activado: omitiendo Speech-to-Text V1.", 55);
+    } else {
+      // In Vertex AI ADC mode, we can use the GCS URI directly for Gemini multimodal ingestion
+      geminiFileUri = gcsUri;
+      console.log(`[PIPELINE] Vertex AI ADC mode: using GCS URI directly: ${geminiFileUri}`);
+      await logToSession(sessionId, "UPLOAD", "Modo Vertex AI: utilizando URI de GCS directamente.", 50);
+    }
+
+    // 3. Etapa 1: Transcripción y Diarización de Alta Precisión con Gemini Multimodal (Dual-Pass Stage 1)
+    await logToSession(sessionId, "STT_API", "Etapa 1/2: Iniciando transcripción y separación de voces nativa con Gemini 2.5...", 60);
+
+    const transcriptPrompt = `Analyze the attached audio file: "${fileName}".
+Generate a complete, high-fidelity transcription of the spoken conversation.
+You MUST separate different speakers (Speaker Diarization) and tag them clearly (e.g. Speaker 1, Speaker 2, Speaker 3).
+Provide precise timing markers/timestamps (e.g., [00:15], [02:30]) at the beginning of each dialogue segment or when the speaker changes or a new topic starts.
+
+CRITICAL LANGUAGE REQUIREMENT: Transcribe exactly what is spoken. If the audio is in Spanish, the transcript MUST be in Spanish. If it is in English, the transcript MUST be in English. Do not translate the spoken words during transcription.`;
+
+    const transcriptContents: any[] = [];
+    if (geminiFileUri) {
+      transcriptContents.push({
+        fileData: {
+          fileUri: geminiFileUri,
+          mimeType: uploadMime,
+        }
+      });
+    } else {
+      // Base64 inline fallback for smaller files if upload failed completely
+      const fileStats = fs.existsSync(processedFilePath) ? fs.statSync(processedFilePath) : null;
+      if (fileStats && fileStats.size < 20 * 1024 * 1024) {
+        console.log(`[PIPELINE] Using Base64 inlineData fallback (File size: ${Math.round(fileStats.size / 1024 / 1024)}MB)...`);
+        const base64Content = fs.readFileSync(processedFilePath).toString("base64");
+        transcriptContents.push({
+          inlineData: {
+            mimeType: uploadMime,
+            data: base64Content
+          }
+        });
       } else {
-        await logToSession(sessionId, "STT_API", "Transcodificación ausente para formato comprimido (WEBM/M4A): omitiendo Speech-to-Text V1 y enrutando directamente a Gemini.", 55);
+        throw new Error("No se pudo subir el archivo de audio a la nube y el archivo local es demasiado grande para procesarse en memoria.");
       }
     }
 
-    // 4. Gemini structured synthesis
+    transcriptContents.push({
+      text: transcriptPrompt
+    });
+
+    console.log("[PIPELINE] Querying Gemini 2.5 Flash for high-fidelity transcription (Stage 1)...");
+    const transcriptResponse = await generateWithFallback({
+      model: "gemini-2.5-flash",
+      contents: transcriptContents,
+      config: {
+        temperature: 0.1, // low temperature for precise transcription
+      }
+    });
+
+    finalTranscript = transcriptResponse.text;
+    if (!finalTranscript) {
+      throw new Error("Gemini no pudo generar la transcripción del audio.");
+    }
+    console.log(`[PIPELINE] Stage 1 Transcription complete. Length: ${finalTranscript.length} characters.`);
+    await logToSession(sessionId, "STT_API", "Transcripción y separación de voces completada con éxito.", 75);
+
+    // 4. Etapa 2: Síntesis Estructurada y Mapeo Real (Dual-Pass Stage 2)
     let parsedStudySession: any = null;
 
-    if (sttSuccess) {
-      // Stage 1 Schema configuration
-      const stage1Schema = JSON.parse(JSON.stringify(summaryResponseSchema));
-      stage1Schema.properties.summary.description = `A beautifully detailed markdown executive summary structured strictly following the layout, headers, blockquotes, and lists of this template:\n${selectedTemplate.prompt}`;
+    // Stage 1 Schema configuration
+    const stage1Schema = JSON.parse(JSON.stringify(summaryResponseSchema));
+    stage1Schema.properties.summary.description = `A beautifully detailed markdown executive summary structured strictly following the layout, headers, blockquotes, and lists of this template:\n${selectedTemplate.prompt}`;
 
-      // Stage 1 Prompt
-      const stage1Prompt = `You are a world-class professional meeting summary editor and business coordinator. 
+    // Stage 2 Prompt
+    const stage2Prompt = `You are a world-class professional meeting summary editor and business coordinator. 
 We have transcribed a meeting audio file: "${fileName}". Below is the official speaker-diarized transcript:
 
 === OFFICIAL DIARIZED TRANSCRIPT ===
@@ -722,165 +752,65 @@ Generate fully populated results in JSON format according to the summaryResponse
 
 CRITICAL LANGUAGE REQUIREMENT: All output text (including title, summary, and action items) MUST be strictly in the detected language of the source transcript. If the transcript is in Spanish, the entire JSON output MUST be in Spanish. DO NOT respond in English if the source is in Spanish.`;
 
-      console.log("[PIPELINE] Querying Gemini 2.5 Flash for complete summary, action items/goals, and speaker mapping...");
-      await logToSession(sessionId, "STAGE_1", "Generando resumen ejecutivo estructurado, metas detalladas y mapeo de oradores reales...", 80);
-      const stage1Response = await generateWithFallback({
-        model: "gemini-2.5-flash",
-        contents: [{ text: stage1Prompt }],
-        config: {
-          responseMimeType: "application/json",
-          responseSchema: stage1Schema,
-          temperature: 0.2,
-          maxOutputTokens: 8192
-        }
-      });
+    console.log("[PIPELINE] Querying Gemini 2.5 Flash for complete structured summary and speaker mapping (Stage 2)...");
+    await logToSession(sessionId, "STAGE_1", "Etapa 2/2: Sintetizando informe estructurado, metas y mapeando oradores reales...", 85);
+    
+    const stage2Response = await generateWithFallback({
+      model: "gemini-2.5-flash",
+      contents: [{ text: stage2Prompt }],
+      config: {
+        responseMimeType: "application/json",
+        responseSchema: stage1Schema,
+        temperature: 0.2,
+        maxOutputTokens: 8192
+      }
+    });
 
-      const stage1Text = stage1Response.text;
-      if (!stage1Text) throw new Error("Stage 1 summary generation returned empty response.");
+    const stage2Text = stage2Response.text;
+    if (!stage2Text) throw new Error("La Etapa 2 de síntesis con Gemini retornó una respuesta vacía.");
 
-      const stage1Result = JSON.parse(stage1Text.trim());
-      const title = stage1Result.title;
-      const summary = stage1Result.summary;
-      const actionItems = stage1Result.actionItems || [];
-      
-      // Build a standard speakerMap dictionary from speakerMappings array
-      const speakerMap: Record<string, string> = {};
-      if (stage1Result.speakerMappings && Array.isArray(stage1Result.speakerMappings)) {
-        for (const mapping of stage1Result.speakerMappings) {
-          if (mapping.speakerTag && mapping.realName) {
-            speakerMap[mapping.speakerTag] = mapping.realName;
-          }
+    const stage2Result = JSON.parse(stage2Text.trim());
+    const title = stage2Result.title;
+    const summary = stage2Result.summary;
+    const actionItems = stage2Result.actionItems || [];
+    
+    // Build a standard speakerMap dictionary from speakerMappings array
+    const speakerMap: Record<string, string> = {};
+    if (stage2Result.speakerMappings && Array.isArray(stage2Result.speakerMappings)) {
+      for (const mapping of stage2Result.speakerMappings) {
+        if (mapping.speakerTag && mapping.realName) {
+          speakerMap[mapping.speakerTag] = mapping.realName;
         }
       }
-
-      // Apply speaker re-labeling to finalTranscript
-      if (Object.keys(speakerMap).length > 0) {
-        console.log("[PIPELINE STAGE 1] Applying speaker mapping:", speakerMap);
-        for (const [key, name] of Object.entries(speakerMap)) {
-          if (name && typeof name === "string") {
-            const escapedKey = key.replace(/[-\/\\^$*+?.()|[\]{}]/g, '\\$&');
-            const regex = new RegExp(`Speaker ${escapedKey}:`, "g");
-            finalTranscript = finalTranscript.replace(regex, `${name}:`);
-          }
-        }
-      }
-
-      // Assemble consolidated parsedStudySession (Flashcards and Mind Map deprecated for extreme loading speed)
-      parsedStudySession = {
-        title,
-        summary,
-        actionItems: actionItems,
-        mindMap: { id: "root", label: "Empty", details: "", children: [] },
-        flashcards: []
-      };
-
-      await logToSession(sessionId, "STAGE_2", "Plan de acción y metas procesadas. Generación completada con éxito.", 100);
-
-    } else {
-      // Fallback single-pass behavior (used for local developer mode, or if GCS/STT fails in production)
-      console.log("[PIPELINE FALLBACK] Running single-pass Gemini media analysis...");
-      await logToSession(sessionId, "STAGE_1", "Iniciando análisis multimedia de una sola pasada con Gemini 2.5 Flash...", 80);
-      // The Gemini Developer API (API key) cannot read gs:// URIs — only Vertex AI (ADC) can.
-      // If in Developer API mode, always upload the local file to Gemini Files API regardless of whether
-      // a GCS URI exists. If using Vertex AI ADC, the gs:// URI works directly.
-      let fallbackFileUri = geminiFileUri;
-      if (!fallbackFileUri) {
-        if (isDeveloperApiMode()) {
-          console.log("[PIPELINE FALLBACK] Developer API mode: uploading local WAV to Gemini Files API (gs:// URIs not supported)...");
-          await logToSession(sessionId, "UPLOAD", "Cargando archivo a la API de Archivos de Gemini...", 82);
-          try {
-            const fileRef = await ai.files.upload({
-              file: processedFilePath,
-              config: {
-                mimeType: uploadMime,
-                displayName: uploadName,
-              }
-            });
-            fallbackFileUri = fileRef.uri || "";
-            geminiFileUri = fallbackFileUri;
-            console.log(`[PIPELINE FALLBACK] Gemini Files upload successful: ${fallbackFileUri}`);
-            await logToSession(sessionId, "UPLOAD", "Carga en la API de Archivos completada con éxito.", 85);
-          } catch (uploadErr) {
-            console.error("[PIPELINE FALLBACK] Failed to upload file to Gemini Files API, will fallback to inlineData:", uploadErr);
-            await logToSession(sessionId, "UPLOAD", "La carga en la API de Archivos falló, usando fallback de inlineData en Base64.", 85);
-          }
-        } else {
-          // Vertex AI (ADC) can read gs:// URIs natively
-          fallbackFileUri = gcsUri;
-          console.log(`[PIPELINE FALLBACK] Vertex AI ADC mode: using GCS URI directly: ${fallbackFileUri}`);
-          await logToSession(sessionId, "UPLOAD", "Modo Vertex AI: utilizando URI de GCS directamente.", 85);
-        }
-      }
-
-      const contentPromptText = `You are an advanced corporate multimedia processor. Carefully analyze this uploaded media file: "${fileName}".
-      Reconstruct the exact narrative flow as the transcript, timestamping key or speaker changes. Then compile a high-fidelity business suite.
-      
-      Generate fully populated and valid results in JSON format according to the supplied responseSchema:
-      1. An academic and professional title.
-      2. A beautiful detailed summary/resume in formatted Markdown based on the template layout: "${selectedTemplate.name}". Ensure all major highlights, targets, and notes are covered.
-      3. A complete timestamped narrative transcript or detailed chapter layout.
-      4. Structured follow-up Action Items and Goals. Make sure to capture ALL meeting goals, commitments, targets, and decisions. Do NOT condense or omit any discussed milestone. This is extremely critical: do not skimp on goals (no escatimar en las metas u objetivos).
-      
-      Generate fully populated and valid results in JSON format according to the supplied responseSchema.${speakerContext}
-      
-      CRITICAL LANGUAGE REQUIREMENT: All generated text fields (title, summary, transcript, actionItems) MUST be strictly in the detected language of the source media. If the spoken language is Spanish, the entire JSON output MUST be in Spanish. DO NOT respond in English if the source is in Spanish.`;
-
-      const contentsPayload: any[] = [];
-      if (fallbackFileUri) {
-        contentsPayload.push({
-          fileData: {
-            fileUri: fallbackFileUri,
-            mimeType: uploadMime,
-          }
-        });
-      } else {
-        // Absolute fallback: read local file and send as base64 inlineData (supported up to 20MB)
-        const fileStats = fs.existsSync(processedFilePath) ? fs.statSync(processedFilePath) : null;
-        if (fileStats && fileStats.size < 20 * 1024 * 1024) {
-          console.log(`[PIPELINE FALLBACK] Using Base64 inlineData fallback (File size: ${Math.round(fileStats.size / 1024 / 1024)}MB)...`);
-          await logToSession(sessionId, "STAGE_1", "Leyendo archivo local para enviar inlineData Base64...", 88);
-          const base64Content = fs.readFileSync(processedFilePath).toString("base64");
-          contentsPayload.push({
-            inlineData: {
-              mimeType: uploadMime,
-              data: base64Content
-            }
-          });
-          await logToSession(sessionId, "STAGE_1", "Archivo cargado en memoria listo para enviar.", 91);
-        } else {
-          throw new Error("No media file URI was available, and the local file was too large or missing to send as inlineData.");
-        }
-      }
-
-      contentsPayload.push({
-        text: contentPromptText
-      });
-
-      await logToSession(sessionId, "STAGE_2", "Sintetizando informe completo en una sola pasada con Gemini 2.5 Flash...", 94);
-      const response = await generateWithFallback({
-        model: "gemini-2.5-flash",
-        contents: contentsPayload,
-        config: {
-          responseMimeType: "application/json",
-          responseSchema: studyResponseSchema,
-          temperature: 0.2,
-          maxOutputTokens: 8192
-        }
-      });
-
-      const parsedText = response.text;
-      if (!parsedText) throw new Error("No response output text was generated by Gemini.");
-
-      parsedStudySession = JSON.parse(parsedText.trim());
-      parsedStudySession.mindMap = { id: "root", label: "Empty", details: "", children: [] };
-      parsedStudySession.flashcards = [];
-      finalTranscript = parsedStudySession.transcript;
     }
+
+    // Apply speaker re-labeling to finalTranscript
+    if (Object.keys(speakerMap).length > 0) {
+      console.log("[PIPELINE] Applying speaker mapping:", speakerMap);
+      for (const [key, name] of Object.entries(speakerMap)) {
+        if (name && typeof name === "string") {
+          const escapedKey = key.replace(/[-\/\\^$*+?.()|[\]{}]/g, '\\$&');
+          const regex = new RegExp(`Speaker ${escapedKey}:`, "g");
+          finalTranscript = finalTranscript.replace(regex, `${name}:`);
+        }
+      }
+    }
+
+    // Assemble consolidated parsedStudySession
+    parsedStudySession = {
+      title,
+      summary,
+      actionItems: actionItems,
+      mindMap: { id: "root", label: "Empty", details: "", children: [] },
+      flashcards: []
+    };
+
+    await logToSession(sessionId, "STAGE_2", "Plan de acción, resumen y oradores procesados con éxito.", 100);
 
     return { parsedStudySession, finalTranscript, gcsUri, geminiFileUri };
 
   } finally {
-    // Cleanup temp files
+    // Cleanup local temp file
     try {
       if (fs.existsSync(localFilePath)) {
         fs.unlinkSync(localFilePath);
@@ -888,15 +818,6 @@ CRITICAL LANGUAGE REQUIREMENT: All output text (including title, summary, and ac
       }
     } catch (cleanupErr) {
       console.error("[PIPELINE] Failed to clean up original temp file:", cleanupErr);
-    }
-
-    try {
-      if (fs.existsSync(tempWavPath)) {
-        fs.unlinkSync(tempWavPath);
-        console.log(`[PIPELINE] Cleaned up transcoded WAV temp file: ${tempWavPath}`);
-      }
-    } catch (cleanupErr) {
-      console.error("[PIPELINE] Failed to clean up transcoded WAV temp file:", cleanupErr);
     }
   }
 }
