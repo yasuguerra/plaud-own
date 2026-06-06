@@ -496,7 +496,7 @@ async function transcribeAudioWithChirp2(
 
     if (!response.results || response.results.length === 0) {
       console.warn(`[STT V1] No results returned from Speech-to-Text.`);
-      return "[00:00:00] Speaker 1: (No speech detected)";
+      throw new Error("No speech detected or invalid audio format for Speech-to-Text V1.");
     }
 
     const parseDuration = (val: any): number => {
@@ -534,7 +534,7 @@ async function transcribeAudioWithChirp2(
 
     if (words.length === 0) {
       console.warn(`[STT V1] No words with speaker tags found.`);
-      return "[00:00:00] Speaker 1: (No speech detected)";
+      throw new Error("No speaker-diarized words found. Audio may be corrupt or encoded incorrectly.");
     }
 
     let currentSegment: { speaker: string; startTime: number; endTime: number; words: string[] } | null = null;
@@ -572,7 +572,7 @@ async function transcribeAudioWithChirp2(
     }
 
     if (segments.length === 0) {
-      return "[00:00:00] Speaker 1: (No diarized text segments found)";
+      throw new Error("No diarized text segments found in the transcription.");
     }
 
     const formattedTranscript = segments.map(seg => {
@@ -667,9 +667,18 @@ async function executeAudioProcessing(
 
     const ai = getGeminiClient();
 
-    // 3. Transcription Phase (Speech-to-Text Chirp 2) - skipped in Turbo Mode
+    // 3. Transcription Phase (Speech-to-Text Chirp 2) - skipped in Turbo Mode or when raw format is unsupported
+    const isSTTSupportedRawFormat = !isTurbo && (
+      transcodedSuccessfully || 
+      mimeType.includes("ogg") || 
+      mimeType.includes("mp3") || 
+      mimeType.includes("mpeg") || 
+      fileName.endsWith(".mp3") || 
+      fileName.endsWith(".ogg")
+    );
+
     let sttSuccess = false;
-    if (gcsUri && !isTurbo) {
+    if (gcsUri && isSTTSupportedRawFormat) {
       try {
         await logToSession(sessionId, "STT_API", "Iniciando transcripción por oradores con Google Speech-to-Text V1...", 50);
         finalTranscript = await transcribeAudioWithChirp2(gcsUri, mimeType, transcodedSuccessfully);
@@ -678,6 +687,12 @@ async function executeAudioProcessing(
       } catch (sttErr: any) {
         console.error("[PIPELINE STT ERROR] Speech-to-Text failed, falling back to single-pass Gemini:", sttErr);
         await logToSession(sessionId, "STT_API", "La transcripción dedicada falló o no está configurada, utilizando fallback de Gemini.", 70);
+      }
+    } else if (gcsUri && !isSTTSupportedRawFormat) {
+      if (isTurbo) {
+        await logToSession(sessionId, "STT_API", "Modo Turbo activado: omitiendo Speech-to-Text V1.", 55);
+      } else {
+        await logToSession(sessionId, "STT_API", "Transcodificación ausente para formato comprimido (WEBM/M4A): omitiendo Speech-to-Text V1 y enrutando directamente a Gemini.", 55);
       }
     }
 
@@ -690,7 +705,7 @@ async function executeAudioProcessing(
       stage1Schema.properties.summary.description = `A beautifully detailed markdown executive summary structured strictly following the layout, headers, blockquotes, and lists of this template:\n${selectedTemplate.prompt}`;
 
       // Stage 1 Prompt
-      const stage1Prompt = `You are a world-class professional summary editor. 
+      const stage1Prompt = `You are a world-class professional meeting summary editor and business coordinator. 
 We have transcribed a meeting audio file: "${fileName}". Below is the official speaker-diarized transcript:
 
 === OFFICIAL DIARIZED TRANSCRIPT ===
@@ -699,15 +714,16 @@ ${finalTranscript}
 
 Based on this transcript, generate:
 1. An academic and professional title for this meeting (max 6 words).
-2. A beautiful, highly detailed study summary in formatted Markdown following strictly the layout guidelines of this template: "${selectedTemplate.name}".
-3. Resolve the generic speaker labels in the transcript (e.g. '1', '2') to real participant names based on self-introductions, context, or the provided user workspace details, and populate the "speakerMappings" key with this mapping.
+2. A beautiful, highly detailed meeting summary in formatted Markdown following strictly the layout guidelines of this template: "${selectedTemplate.name}". Ensure all major highlights, decisions, and discussions are fully covered.
+3. An exhaustive list of ALL action items, goals, objectives, and decisions made. DO NOT condense or omit any discussed milestone. This is extremely critical: do not skimp on goals (no escatimar en las metas u objetivos).
+4. Resolve the generic speaker labels in the transcript (e.g. '1', '2') to real participant names based on self-introductions, context, or the provided user workspace details, and populate the "speakerMappings" key with this mapping.
 
 Generate fully populated results in JSON format according to the summaryResponseSchema.${speakerContext}
 
-CRITICAL LANGUAGE REQUIREMENT: All output text (including title and summary) MUST be strictly in the detected language of the source transcript. If the transcript is in Spanish, the entire JSON output MUST be in Spanish. DO NOT respond in English if the source is in Spanish.`;
+CRITICAL LANGUAGE REQUIREMENT: All output text (including title, summary, and action items) MUST be strictly in the detected language of the source transcript. If the transcript is in Spanish, the entire JSON output MUST be in Spanish. DO NOT respond in English if the source is in Spanish.`;
 
-      console.log("[PIPELINE STAGE 1] Querying Gemini for summary and speaker mapping...");
-      await logToSession(sessionId, "STAGE_1", "Generando resumen estructurado y mapeo de oradores reales con Gemini 2.5 Flash...", 80);
+      console.log("[PIPELINE] Querying Gemini 2.5 Flash for complete summary, action items/goals, and speaker mapping...");
+      await logToSession(sessionId, "STAGE_1", "Generando resumen ejecutivo estructurado, metas detalladas y mapeo de oradores reales...", 80);
       const stage1Response = await generateWithFallback({
         model: "gemini-2.5-flash",
         contents: [{ text: stage1Prompt }],
@@ -725,6 +741,7 @@ CRITICAL LANGUAGE REQUIREMENT: All output text (including title and summary) MUS
       const stage1Result = JSON.parse(stage1Text.trim());
       const title = stage1Result.title;
       const summary = stage1Result.summary;
+      const actionItems = stage1Result.actionItems || [];
       
       // Build a standard speakerMap dictionary from speakerMappings array
       const speakerMap: Record<string, string> = {};
@@ -748,53 +765,16 @@ CRITICAL LANGUAGE REQUIREMENT: All output text (including title and summary) MUS
         }
       }
 
-      // Stage 2: Generate Action Items, Mind Map, and Flashcards based on Stage 1 summary and speaker-mapped transcript!
-      const stage2Prompt = `You are an educational designer and conceptual illustrator. 
-Based on the following speaker-mapped meeting transcript and its executive summary:
-
-=== MEETING SUMMARY ===
-${summary}
-=== END SUMMARY ===
-
-=== SPEAKER-MAPPED TRANSCRIPT ===
-${finalTranscript}
-=== END TRANSCRIPT ===
-
-Generate the complete interactive study assets according to the assetsResponseSchema:
-1. Structured follow-up Action Items with importance levels (high/medium/low).
-2. A highly descriptive Mind Map concept hierarchy matching the MindMapNode schema structure for canvas visualization.
-3. Five to seven highly engaging study flashcards testing the main agreements or concepts.
-
-Generate fully populated results in JSON format according to the assetsResponseSchema.
-
-CRITICAL LANGUAGE REQUIREMENT: All generated asset text fields (actionItems, mindMap labels/details, and flashcards) MUST be strictly in the detected language of the source summary/transcript. If the summary/transcript is in Spanish, the entire JSON output MUST be in Spanish. DO NOT respond in English if the source is in Spanish.`;
-
-      console.log("[PIPELINE STAGE 2] Querying Gemini for interactive study assets (Action Items, Mind Map, Flashcards)...");
-      await logToSession(sessionId, "STAGE_2", "Generando plan de acción, mapa mental y tarjetas de memoria con Gemini...", 90);
-      const stage2Response = await generateWithFallback({
-        model: "gemini-2.5-flash",
-        contents: [{ text: stage2Prompt }],
-        config: {
-          responseMimeType: "application/json",
-          responseSchema: assetsResponseSchema,
-          temperature: 0.2,
-          maxOutputTokens: 8192
-        }
-      });
-
-      const stage2Text = stage2Response.text;
-      if (!stage2Text) throw new Error("Stage 2 assets generation returned empty response.");
-
-      const stage2Result = JSON.parse(stage2Text.trim());
-
-      // Assemble consolidated parsedStudySession
+      // Assemble consolidated parsedStudySession (Flashcards and Mind Map deprecated for extreme loading speed)
       parsedStudySession = {
         title,
         summary,
-        actionItems: stage2Result.actionItems || [],
-        mindMap: stage2Result.mindMap || { id: "root", label: "Empty", details: "", children: [] },
-        flashcards: stage2Result.flashcards || []
+        actionItems: actionItems,
+        mindMap: { id: "root", label: "Empty", details: "", children: [] },
+        flashcards: []
       };
+
+      await logToSession(sessionId, "STAGE_2", "Plan de acción y metas procesadas. Generación completada con éxito.", 100);
 
     } else {
       // Fallback single-pass behavior (used for local developer mode, or if GCS/STT fails in production)
@@ -832,20 +812,18 @@ CRITICAL LANGUAGE REQUIREMENT: All generated asset text fields (actionItems, min
         }
       }
 
-      const contentPromptText = `You are an advanced multimedia processor. Carefully analyze this uploaded media file: "${fileName}".
-      Reconstruct the exact narrative flow as the transcript, timestamping key or speaker changes. Then compile a high-fidelity study suite.
+      const contentPromptText = `You are an advanced corporate multimedia processor. Carefully analyze this uploaded media file: "${fileName}".
+      Reconstruct the exact narrative flow as the transcript, timestamping key or speaker changes. Then compile a high-fidelity business suite.
       
       Generate fully populated and valid results in JSON format according to the supplied responseSchema:
       1. An academic and professional title.
-      2. A beautiful detailed summary/resume in formatted Markdown based on the template layout: "${selectedTemplate.name}".
+      2. A beautiful detailed summary/resume in formatted Markdown based on the template layout: "${selectedTemplate.name}". Ensure all major highlights, targets, and notes are covered.
       3. A complete timestamped narrative transcript or detailed chapter layout.
-      4. Structured follow-up Action Items.
-      5. A highly descriptive Mind Map concept hierarchy matching the MindMapNode schema structure.
-      6. Five to seven highly engaging study flashcards testing main concept outcomes.
+      4. Structured follow-up Action Items and Goals. Make sure to capture ALL meeting goals, commitments, targets, and decisions. Do NOT condense or omit any discussed milestone. This is extremely critical: do not skimp on goals (no escatimar en las metas u objetivos).
       
       Generate fully populated and valid results in JSON format according to the supplied responseSchema.${speakerContext}
       
-      CRITICAL LANGUAGE REQUIREMENT: All generated text fields (title, summary, transcript, actionItems, mindMap, flashcards) MUST be strictly in the detected language of the source media. If the spoken language is Spanish, the entire JSON output MUST be in Spanish. DO NOT respond in English if the source is in Spanish.`;
+      CRITICAL LANGUAGE REQUIREMENT: All generated text fields (title, summary, transcript, actionItems) MUST be strictly in the detected language of the source media. If the spoken language is Spanish, the entire JSON output MUST be in Spanish. DO NOT respond in English if the source is in Spanish.`;
 
       const contentsPayload: any[] = [];
       if (fallbackFileUri) {
@@ -894,6 +872,8 @@ CRITICAL LANGUAGE REQUIREMENT: All generated asset text fields (actionItems, min
       if (!parsedText) throw new Error("No response output text was generated by Gemini.");
 
       parsedStudySession = JSON.parse(parsedText.trim());
+      parsedStudySession.mindMap = { id: "root", label: "Empty", details: "", children: [] };
+      parsedStudySession.flashcards = [];
       finalTranscript = parsedStudySession.transcript;
     }
 
@@ -1491,23 +1471,24 @@ app.post("/api/chat", async (req, res) => {
 
     const ai = getGeminiClient();
 
-    // Prepare system instruction focusing as a friendly, brilliant academic Study Buddy
-    const systemInstruction = `You are an expert AI Study Buddy and brilliant academic companion. 
-Your goal is to help the user learn, clarify details, and discuss the provided meeting or lecture material.
-The material belongs to a corporate study session or meeting about: "${contextSubject || "Uploaded Lecture Material"}".
+    // Prepare system instruction focusing as a brilliant expert AI Corporate Assistant
+    const systemInstruction = `You are an expert AI Corporate Assistant and brilliant meeting companion. 
+Your goal is to help the user clarify details, extract decisions, and discuss the provided meeting material.
+The material belongs to a corporate session or meeting about: "${contextSubject || "Uploaded Meeting Material"}".
 
 Here is the comprehensive summarized core content and transcript of this session for your reference:
 === BEGIN STUDY MATERIAL CORES ===
-${contextSummary || "User has not uploaded or generated any material yet. Encourage them to provide an audio/video first, or answer their academic questions generally."}
+${contextSummary || "User has not uploaded or generated any material yet. Encourage them to provide an audio/video first."}
 === END STUDY MATERIAL CORES ===
 
-ANTI-HALLUCINATION RULES & GROUNDING CONSTRAINTS (CRITICAL):
-1. Rely EXCLUSIVELY on the provided transcript and summary text above. Never invent decisions, dates, tasks, speakers, agreements, or outcomes not explicitly stated in the context.
-2. If the user asks a question about the meeting that cannot be answered or verified using the provided material, you MUST politely and clearly state that this information was not discussed in the meeting or is not available in the records, rather than guessing or making it up.
-3. Keep all responses strictly grounded in facts. If you aren't sure or if the text is ambiguous, clarify that instead of assuming.
-4. When discussing quotes or events, refer to specific timestamps (e.g. '[00:15]') and use the unifed speaker labels: Speaker 1, Speaker 2, Speaker 3, etc.
-5. Always respond in the SAME language as the user's question (default to Spanish since the client interface and user are using Spanish).
-6. Act smart, helpful, encouraging, and concise. Do not use extremely long text blocks unless explicitly asked for deep explanation.`;
+PROTECTORES ABSOLUTOS DE ANTI-ALUCINACIÓN (CRITICAL GROUNDING CONSTRAINTS):
+1. Rely EXCLUSIVELY on the provided transcript and summary text above. Never invent, assume, extrapolate, or estimate decisions, dates, tasks, speakers, agreements, sales figures, revenue, or outcomes not explicitly and literally stated in the context.
+2. If the user asks a question about the meeting that cannot be answered, verified, or proven using the provided material, you MUST respond EXACTLY with a polite, clear refusal in Spanish stating that this information was not discussed in the meeting:
+   "Lo siento, esta información no fue discutida en la reunión. De acuerdo con el registro oficial de la conversación, no se mencionan detalles sobre este tema."
+3. Do not try to guess, assume, or generalize. If a topic (such as sales, marketing, engineering, dates, numbers) is not discussed or is only partially mentioned, state exactly what is known or state that it is not available.
+4. Keep all responses strictly grounded in facts. If you are asked about something outside the meeting scope, remind the user that you are only authorized to discuss the contents of the official transcript.
+5. Always respond in the same language as the user's query (Spanish by default).
+6. Act smart, highly professional, direct, and concise.`;
 
     // Map history to the required format for gemini models
     // Chat schema: { role: string, parts: [{ text: string }] }
@@ -1556,76 +1537,30 @@ const studyResponseSchema = {
   properties: {
     title: { 
       type: Type.STRING, 
-      description: "A concise, academic, highly descriptive title for this lecture or material (max 6 words)." 
+      description: "A concise, professional, highly descriptive title for this meeting or material (max 6 words)." 
     },
     summary: { 
       type: Type.STRING, 
-      description: "A detailed, beautiful markdown-formatted study summary and resume of the material. Must be high-density, well-paddled structure using bullets, major sections, and takeaways." 
+      description: "A detailed, beautiful markdown-formatted meeting summary and resume of the material. Must be high-density, well-paddled structure using bullets, major sections, and takeaways, listing ALL major targets, goals, and milestones." 
     },
     transcript: { 
       type: Type.STRING, 
-      description: "A fluent, highly detailed written narration transcript simulating exactly what was spoken in this lecture. Organize with timestamps where natural (e.g. [00:15])." 
+      description: "A fluent, highly detailed written narration transcript simulating exactly what was spoken in this lecture/meeting. Organize with timestamps where natural (e.g. [00:15])." 
     },
     actionItems: {
       type: Type.ARRAY,
       items: {
         type: Type.OBJECT,
         properties: {
-          task: { type: Type.STRING, description: "A highly actionable take-home item or follow-up exercise from this material." },
-          importance: { type: Type.STRING, enum: ["high", "medium", "low"], description: "The priority of this educational milestone." }
+          task: { type: Type.STRING, description: "A highly actionable meeting goal, commitment, target or follow-up item. Exhaustively capture every single objective, target, or assignment discussed in the meeting without exception." },
+          importance: { type: Type.STRING, enum: ["high", "medium", "low"], description: "The priority of this action item or goal." }
         },
         required: ["task", "importance"]
-      }
-    },
-    mindMap: {
-      type: Type.OBJECT,
-      description: "A nested hierarchical concept study map node structure for canvas visualization.",
-      properties: {
-        id: { type: Type.STRING, description: "Unique string ID (e.g., 'root')" },
-        label: { type: Type.STRING, description: "Core topic label (1-3 words, e.g. 'Web Dev Principles')" },
-        details: { type: Type.STRING, description: "Brief explanatory subtitle" },
-        color: { type: Type.STRING, description: "Hex CSS color string of choice" },
-        children: {
-          type: Type.ARRAY,
-          items: {
-            type: Type.OBJECT,
-            properties: {
-              id: { type: Type.STRING, description: "Sub-topic ID (e.g. 'topic-1')" },
-              label: { type: Type.STRING, description: "Sub-topic label" },
-              details: { type: Type.STRING, description: "Sub-topic subtitle explain" },
-              children: {
-                type: Type.ARRAY,
-                items: {
-                  type: Type.OBJECT,
-                  properties: {
-                    id: { type: Type.STRING, description: "Detailed leaf ID" },
-                    label: { type: Type.STRING, description: "Specific definition/concept" },
-                    details: { type: Type.STRING, description: "Core concise definition takeaway" }
-                  },
-                  required: ["id", "label", "details"]
-                }
-              }
-            },
-            required: ["id", "label", "details", "children"]
-          }
-        }
       },
-      required: ["id", "label", "details", "color", "children"]
-    },
-    flashcards: {
-      type: Type.ARRAY,
-      items: {
-        type: Type.OBJECT,
-        properties: {
-          question: { type: Type.STRING, description: "A high-quality study question testing memory recall." },
-          answer: { type: Type.STRING, description: "Clear, perfect explanation answer." }
-        },
-        required: ["question", "answer"]
-      },
-      description: "Provide exactly 5 to 7 high-impact study flashcards testing main lessons."
+      description: "An exhaustive list of ALL action items, goals, objectives, and decisions made. DO NOT condense or omit any discussed milestone."
     }
   },
-  required: ["title", "summary", "transcript", "actionItems", "mindMap", "flashcards"]
+  required: ["title", "summary", "transcript", "actionItems"]
 };
 
 // Define Stage 1 Schema for Summary Generation
@@ -1634,11 +1569,23 @@ const summaryResponseSchema = {
   properties: {
     title: { 
       type: Type.STRING, 
-      description: "A concise, academic, highly descriptive title for this lecture or material (max 6 words)." 
+      description: "A concise, professional, highly descriptive title for this meeting or material (max 6 words)." 
     },
     summary: { 
       type: Type.STRING, 
-      description: "A detailed, beautiful markdown-formatted study summary and resume of the material. Must be high-density, well-paddled structure using bullets, major sections, and takeaways." 
+      description: "A detailed, beautiful markdown-formatted meeting summary and resume of the material. Must be high-density, well-paddled structure using bullets, major sections, and takeaways, listing ALL major targets, goals, and milestones." 
+    },
+    actionItems: {
+      type: Type.ARRAY,
+      items: {
+        type: Type.OBJECT,
+        properties: {
+          task: { type: Type.STRING, description: "A highly actionable meeting goal, commitment, target or follow-up item. Exhaustively capture every single objective, target, or assignment discussed in the meeting without exception." },
+          importance: { type: Type.STRING, enum: ["high", "medium", "low"], description: "The priority of this action item or goal." }
+        },
+        required: ["task", "importance"]
+      },
+      description: "An exhaustive list of ALL action items, goals, objectives, and decisions made. DO NOT condense or omit any discussed milestone."
     },
     speakerMappings: {
       type: Type.ARRAY,
@@ -1653,7 +1600,7 @@ const summaryResponseSchema = {
       }
     }
   },
-  required: ["title", "summary", "speakerMappings"]
+  required: ["title", "summary", "actionItems", "speakerMappings"]
 };
 
 // Define Stage 2 Schema for Asset Generation

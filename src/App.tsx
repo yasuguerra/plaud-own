@@ -33,8 +33,6 @@ import AudioRecorder from "./components/AudioRecorder";
 import { auth, googleProvider, signInWithPopup, signInWithRedirect, getRedirectResult, signOut, User, initFirebase } from "./firebase";
 import { onAuthStateChanged } from "firebase/auth";
 import ActionItemsList from "./components/ActionItemsList";
-import FlashcardsDeck from "./components/FlashcardsDeck";
-import MindMapCanvas from "./components/MindMapCanvas";
 import ChatBuddy from "./components/ChatBuddy";
 import SidebarHistory from "./components/SidebarHistory";
 import InfographicsDashboard from "./components/InfographicsDashboard";
@@ -300,7 +298,7 @@ export default function App() {
     progress: 0,
     message: ""
   });
-  const [activeTab, setActiveTab] = useState<"summary" | "transcript" | "mindmap" | "flashcards" | "tasks" | "infographics">("transcript");
+  const [activeTab, setActiveTab] = useState<"summary" | "transcript" | "tasks" | "infographics">("transcript");
   const [dragOver, setDragOver] = useState(false);
   const [uploadError, setUploadError] = useState<string | null>(null);
   const [uploadErrorType, setUploadErrorType] = useState<string | null>(null);
@@ -959,14 +957,34 @@ This workspace was custom-curated in **⚡ Turbo Fast-Track Mode** to bypass bro
             message: `Subiendo fragmento ${i + 1} de ${totalChunks} (${Math.round((end / file.size) * 100)}%)...` 
           });
 
-          const chunkResponse = await fetch("/api/upload-chunk", {
-            method: "POST",
-            body: chunkFormData
-          });
+          let chunkResponse: Response | undefined;
+          let retries = 3;
+          let lastError: Error | null = null;
 
-          if (!chunkResponse.ok) {
-            const errText = await chunkResponse.text();
-            throw new Error(`Error subiendo fragmento ${i + 1} de ${totalChunks}: ${errText}`);
+          while (retries > 0) {
+            try {
+              chunkResponse = await fetch("/api/upload-chunk", {
+                method: "POST",
+                body: chunkFormData
+              });
+              if (chunkResponse.ok) {
+                break;
+              } else {
+                const errText = await chunkResponse.text();
+                lastError = new Error(errText);
+              }
+            } catch (fetchErr: any) {
+              lastError = fetchErr;
+            }
+            retries--;
+            if (retries > 0) {
+              console.warn(`[CHUNK UPLOAD FAIL] Chunk ${i + 1}/${totalChunks} failed. Retrying in 1.5s... Attempts left: ${retries}`, lastError);
+              await new Promise(r => setTimeout(r, 1500));
+            }
+          }
+
+          if (!chunkResponse || !chunkResponse.ok) {
+            throw new Error(`Error subiendo fragmento ${i + 1} de ${totalChunks} después de 3 intentos. Detalle: ${lastError?.message || "Conexión interrumpida"}`);
           }
         }
 
@@ -1995,16 +2013,14 @@ This workspace was custom-curated in **⚡ Turbo Fast-Track Mode** to bypass bro
                     </div>
                   </div>
 
-                  {/* Redesigned Tab Switcher Bar & AI Trigger (Reordered: Transcript first, restored Mind Map and Flashcards) */}
+                  {/* Redesigned Tab Switcher Bar & AI Trigger (Reordered: Transcript first, streamlined to keep core focus) */}
                   <div className="flex items-center gap-3 self-start sm:self-auto flex-wrap">
                     <div className="flex bg-white rounded-xl border border-slate-200/80 p-1 shadow-3xs overflow-x-auto">
                       {[
                         { id: "transcript", label: "Transcript" },
                         { id: "summary", label: "Summary" },
-                        { id: "mindmap", label: "Mind Map" },
-                        { id: "flashcards", label: "Flashcards" },
                         { id: "infographics", label: "Infographics" },
-                        { id: "tasks", label: "Goals" }
+                        { id: "tasks", label: "Goals & Tasks" }
                       ].map((subTab) => {
                         const isSelected = activeTab === subTab.id;
                         return (
@@ -2135,24 +2151,6 @@ This workspace was custom-curated in **⚡ Turbo Fast-Track Mode** to bypass bro
                         items={activeSession.actionItems}
                         onToggleItem={handleToggleTask}
                         onDeleteItem={handleDeleteTask}
-                      />
-                    </div>
-                  )}
-
-                  {activeTab === "mindmap" && (
-                    <div className="flex-1 min-h-0 flex flex-col">
-                      <MindMapCanvas 
-                        rootNode={activeSession.mindMap} 
-                        onAskAI={handleAskAI}
-                      />
-                    </div>
-                  )}
-
-                  {activeTab === "flashcards" && (
-                    <div className="flex-1 min-h-0 overflow-y-auto">
-                      <FlashcardsDeck 
-                        cards={activeSession.flashcards} 
-                        onToggleLearned={handleToggleFlashcardLearned}
                       />
                     </div>
                   )}
