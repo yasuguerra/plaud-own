@@ -326,6 +326,21 @@ export default function App() {
   const voiceSigChunksRef = React.useRef<Blob[]>([]);
   const voiceSigTimerRef = React.useRef<NodeJS.Timeout | null>(null);
 
+  // Folder/Tema management states
+  const [folders, setFolders] = useState<TopicFolder[]>([]);
+  const [activeFolderId, setActiveFolderId] = useState<string | null>(null);
+  const [isSynthesizingFolder, setIsSynthesizingFolder] = useState(false);
+  const [selectedSynthesisFolderId, setSelectedSynthesisFolderId] = useState<string | null>(null);
+
+  // Firebase Auth states
+  const [user, setUser] = useState<User | null>(null);
+  const [authLoading, setAuthLoading] = useState(true);
+
+  // Settings and Profile states
+  const [isSettingsOpen, setIsSettingsOpen] = useState(false);
+  const [companyName, setCompanyName] = useState("");
+  const [savingProfile, setSavingProfile] = useState(false);
+
   // Synchronize audio player with active session's localAudioUrl
   useEffect(() => {
     if (audioRef.current) {
@@ -354,21 +369,6 @@ export default function App() {
       }
     }
   }, [activeSessionId, sessions, user]);
-
-  // Folder/Tema management states
-  const [folders, setFolders] = useState<TopicFolder[]>([]);
-  const [activeFolderId, setActiveFolderId] = useState<string | null>(null);
-  const [isSynthesizingFolder, setIsSynthesizingFolder] = useState(false);
-  const [selectedSynthesisFolderId, setSelectedSynthesisFolderId] = useState<string | null>(null);
-
-  // Firebase Auth states
-  const [user, setUser] = useState<User | null>(null);
-  const [authLoading, setAuthLoading] = useState(true);
-
-  // Settings and Profile states
-  const [isSettingsOpen, setIsSettingsOpen] = useState(false);
-  const [companyName, setCompanyName] = useState("");
-  const [savingProfile, setSavingProfile] = useState(false);
 
   // Ingestion Tabs & Inputs state for high-capacity files handling and simulation
   const [activeIngestTab, setActiveIngestTab] = useState<"upload" | "paste" | "simulate">("upload");
