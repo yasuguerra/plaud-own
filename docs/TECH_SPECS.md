@@ -20,8 +20,8 @@ graph TD
     Worker -->|5. Generar Embeddings| Embeddings[Vertex AI Embeddings: text-embedding-004]
     Embeddings -->|6. Indexar Bloques| VectorSearch[Vertex AI Vector Search]
     
-    Worker -->|7. Síntesis Estructurada / Mapas SVG| GeminiPro[Vertex AI Gemini 2.5 Pro]
-    Client -->|8. Chat Conversacional Grounded| GeminiFlash[Vertex AI Gemini 2.5 Flash]
+    Worker -->|7. Síntesis Estructurada / Mapas SVG| Gemini[Vertex AI Gemini 3.5 Flash]
+    Client -->|8. Chat Conversacional Grounded| GeminiChat[Vertex AI Gemini 3.5 Flash]
     
     Worker -->|9. Guardar Metadatos & Archivos| DB[(Cloud Firestore & GCS)]
     Worker -->|10. Historial & Auditoría de Voz| BigQuery[(Google BigQuery)]
@@ -34,10 +34,13 @@ graph TD
 La infraestructura técnica prioriza la excelencia, precisión y confidencialidad exigida por las corporaciones financieras y tecnológicas globales.
 
 ### 2.1 Vertex AI Gemini Enterprise
-Se implementa un modelo híbrido para optimizar tiempos de respuesta y profundidad de razonamiento:
+Se implementa la pila de APIs y modelos de última generación de Google para optimizar la inteligencia, velocidad y eficiencia de costos:
 
-*   **Modelo de Alta Capacidad (Vertex AI `gemini-2.5-pro`)**: Utilizado para el pipeline asíncrono principal (transcripción estructurada, generación del resumen ejecutivo estructurado, SVG del mapa mental y tarjetas de memoria). Su ventana de contexto de 2 millones de tokens permite procesar múltiples reuniones largas consecutivas sin truncamientos.
-*   **Modelo de Baja Latencia (Vertex AI `gemini-2.5-flash`)**: Utilizado en el backend del chat conversacional (`ChatBuddy`) para ofrecer subsegundos de latencia en respuestas en tiempo real.
+*   **Motor Multimodal Veloz (`gemini-3.5-flash`)**: Utilizado para todo el pipeline asíncrono principal (transcripción estructurada de Stage 1, generación de resúmenes de Stage 2, SVG de mapas conceptuales, flashcards) y el chat conversacional básico. Optimizado para la era agéntica, ofrece velocidad excepcional, menor coste y un contexto de 1 millón de tokens con prevención nativa de bucles.
+*   **Motor de Razonamiento Premium (`gemini-3.1-pro`)**: Utilizado para tareas de alta complejidad cognitiva, como la síntesis cruzada de carpetas (Cross-Meeting Report compilation) y análisis de documentos PDF altamente estructurados de hasta 1000 páginas. Incorpora capacidades de razonamiento "thinking" iterativo de vanguardia mundial.
+*   **API de Context Caching (Caché de Contexto)**: Se integra para optimizar las consultas RAG en el asistente conversacional (`ChatBuddy`). Almacena temporalmente en la memoria caché del API de Google las transcripciones y documentos extensos. Esto reduce la latencia de las respuestas a nivel subsegundo y ahorra hasta un 90% en costos de facturación de tokens del API de Gemini.
+*   **Live API (Agente de Voz en Tiempo Real)**: Habilita un canal de comunicación de audio bidireccional y de baja latencia mediante WebSockets, permitiendo al usuario debatir o consultar las minutas usando su propia voz con retroalimentación inmediata (subsegundo).
+*   **Tubería de Audio Auto-Sanable (Self-Healing Audio Pipeline)**: Diseñada como una salvaguarda de doble pasada en [server.ts](server.ts). Si el motor de Gemini presenta bucles de repetición o anomalías debido a silencios o ruidos, el pipeline asíncrono activa automáticamente un fallback de auto-recuperación hacia Google Cloud Speech-to-Text V1/Chirp para salvaguardar y sanar el transcript.
 *   **Seguridad y Gobernanza**: 
     *   No-entrenamiento garantizado mediante acuerdos comerciales de Vertex AI.
     *   Soporte para Claves de Cifrado Administradas por el Cliente (CMEK) a través de **Cloud KMS**.
@@ -126,5 +129,5 @@ Para garantizar la estabilidad en grabaciones extensas (1 a 4 horas), el backend
     *   Llama en paralelo a **Speech-to-Text V2 (Chirp 2)** para la transcripción y diarización premium.
     *   Si existen PDFs cargados, ejecuta el OCR estructural con **Document AI**.
     *   Vectoriza el contenido y alimenta el índice semántico de **Vertex AI Vector Search**.
-5.  **Síntesis con Gemini 2.5 Pro**: Envía la transcripción y el contexto documental a **Gemini 2.5 Pro** con generación estructurada obligatoria en formato JSON para re-etiquetar oradores, estructurar resúmenes ejecutivos en Markdown, extraer planes de acción y generar nodos jerárquicos del mapa conceptual.
+5.  **Síntesis con Gemini 3.5 Flash**: Envía la transcripción y el contexto documental a **Gemini 3.5 Flash** con generación estructurada obligatoria en formato JSON para re-etiquetar oradores, estructurar resúmenes ejecutivos en Markdown, extraer planes de acción y generar nodos jerárquicos del mapa conceptual.
 6.  **Sincronización Final**: El Worker actualiza el estado de la sesión a `"completed"` en **Cloud Firestore**, notificando al cliente en tiempo real y persistiendo las métricas analíticas en **Google BigQuery**.

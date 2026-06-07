@@ -1,5 +1,5 @@
 import { describe, test, expect } from "vitest";
-import { formatTime, getExtensionFromMimeType, FailSafeFirestore } from "./server";
+import { formatTime, getExtensionFromMimeType, FailSafeFirestore, isTranscriptLooping } from "./server";
 
 describe("server.ts utility tests", () => {
   test("formatTime works correctly", () => {
@@ -20,6 +20,26 @@ describe("server.ts utility tests", () => {
     expect(getExtensionFromMimeType("text/markdown")).toBe("md");
     expect(getExtensionFromMimeType("text/csv")).toBe("csv");
     expect(getExtensionFromMimeType("unknown/mime", "fallback")).toBe("fallback");
+  });
+
+  test("isTranscriptLooping detects loops correctly", () => {
+    // 1. A short clean transcript
+    const cleanShort = "Hello, welcome to this meeting.\nWe will discuss our roadmap.";
+    expect(isTranscriptLooping(cleanShort)).toBe(false);
+
+    // 2. A long clean transcript without loops (exceeds 5000 chars)
+    let cleanLong = "";
+    for (let i = 0; i < 100; i++) {
+      cleanLong += `[00:${i}] Speaker 1: This is a totally different and unique line of dialogue for segment ${i} to verify clean status.\n`;
+    }
+    expect(isTranscriptLooping(cleanLong)).toBe(false);
+
+    // 3. A looping transcript repeating the same phrase over and over (exceeds 5000 chars)
+    let loopingTranscript = "";
+    for (let i = 0; i < 100; i++) {
+      loopingTranscript += `[00:${i}] Speaker 2: Eh, lo que tú haces en tu negocio y cómo lo haces.\n`;
+    }
+    expect(isTranscriptLooping(loopingTranscript)).toBe(true);
   });
 });
 

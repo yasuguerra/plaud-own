@@ -328,18 +328,32 @@ export default function App() {
 
   // Synchronize audio player with active session's localAudioUrl
   useEffect(() => {
-    setIsPlaying(false);
-    setCurrentTime(0);
-    setAudioDuration(0);
-    setPlaybackRate(1);
-    
     if (audioRef.current) {
-      audioRef.current.pause();
-      // If there is a localAudioUrl, use it. Otherwise, bind a nice ambient background track fallback
-      audioRef.current.src = activeSession?.localAudioUrl || "https://www.soundhelix.com/examples/mp3/SoundHelix-Song-1.mp3";
-      audioRef.current.load();
+      const currentSession = sessions.find(s => s.id === activeSessionId);
+      let expectedSrc = "https://www.soundhelix.com/examples/mp3/SoundHelix-Song-1.mp3";
+      
+      if (currentSession?.localAudioUrl) {
+        expectedSrc = currentSession.localAudioUrl;
+      } else if (currentSession?.gcsUri && currentSession.gcsUri.startsWith("gs://")) {
+        const uId = user?.uid || "guest";
+        expectedSrc = `/api/sessions/${currentSession.id}/media?userId=${encodeURIComponent(uId)}`;
+      }
+      
+      const currentUrl = new URL(audioRef.current.src, window.location.origin);
+      const targetUrl = new URL(expectedSrc, window.location.origin);
+      
+      if (currentUrl.pathname + currentUrl.search !== targetUrl.pathname + targetUrl.search) {
+        setIsPlaying(false);
+        setCurrentTime(0);
+        setAudioDuration(0);
+        setPlaybackRate(1);
+        
+        audioRef.current.pause();
+        audioRef.current.src = expectedSrc;
+        audioRef.current.load();
+      }
     }
-  }, [activeSessionId]);
+  }, [activeSessionId, sessions, user]);
 
   // Folder/Tema management states
   const [folders, setFolders] = useState<TopicFolder[]>([]);

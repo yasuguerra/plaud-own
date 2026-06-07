@@ -631,6 +631,88 @@ async function getUserSpeakerContext(userId: string): Promise<string> {
   return "";
 }
 
+export function isTranscriptLooping(transcript: string): boolean {
+  if (!transcript || transcript.length < 5000) return false;
+  
+  const lines = transcript.split("\n").map(l => l.trim()).filter(Boolean);
+  if (lines.length < 20) return false;
+  
+  const counts: Record<string, number> = {};
+  for (const line of lines) {
+    const cleanLine = line.replace(/^\[[^\]]+\]\s*(Speaker\s+\d+|[A-Za-z0-9 ]+):\s*/i, "").trim().toLowerCase();
+    if (cleanLine.length > 15) {
+      counts[cleanLine] = (counts[cleanLine] || 0) + 1;
+      if (counts[cleanLine] >= 8) {
+        console.warn(`[TRANSCRIPT LOOP DETECTED] Line "${cleanLine}" repeated ${counts[cleanLine]} times.`);
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+async function runGeminiTranscription(
+  ai: any,
+  geminiFileUri: string,
+  uploadMime: string,
+  fileName: string,
+  processedFilePath: string
+): Promise<string> {
+  const transcriptPrompt = `Analyze the attached audio file: "${fileName}".
+Generate a complete, high-fidelity transcription of the spoken conversation.
+You MUST separate different speakers (Speaker Diarization) and tag them clearly (e.g. Speaker 1, Speaker 2, Speaker 3).
+Provide timing markers/timestamps (e.g., [01:23], [05:45]) at the beginning of each dialogue segment or when the speaker changes or a new topic starts.
+
+CRITICAL TIMESTAMPS RULE: Do NOT output word-level timestamps or millisecond-level timestamps (e.g., do NOT output "[ 0m4s166ms ]" or "[ 0m5s6ms ]"). Only output segment-level timestamps in [MM:SS] format at the beginning of each line or speaker change.
+
+CRITICAL REPETITION RULE: Avoid getting stuck in an infinite loop repeating the same transcription phrases. If there is a silence, pause, static, or repetitive background noise in the audio, do NOT repeat previous words. Always proceed linearly from the start of the audio to the end.
+
+CRITICAL LANGUAGE REQUIREMENT: Transcribe exactly what is spoken. If the audio is in Spanish, the transcript MUST be in Spanish. If it is in English, the transcript MUST be in English. Do not translate the spoken words during transcription.`;
+
+  const transcriptContents: any[] = [];
+  if (geminiFileUri) {
+    transcriptContents.push({
+      fileData: {
+        fileUri: geminiFileUri,
+        mimeType: uploadMime,
+      }
+    });
+  } else {
+    const fileStats = fs.existsSync(processedFilePath) ? fs.statSync(processedFilePath) : null;
+    if (fileStats && fileStats.size < 20 * 1024 * 1024) {
+      console.log(`[PIPELINE] Using Base64 inlineData fallback (File size: ${Math.round(fileStats.size / 1024 / 1024)}MB)...`);
+      const base64Content = fs.readFileSync(processedFilePath).toString("base64");
+      transcriptContents.push({
+        inlineData: {
+          mimeType: uploadMime,
+          data: base64Content
+        }
+      });
+    } else {
+      throw new Error("No se pudo subir el archivo de audio a la nube y el archivo local es demasiado grande para procesarse en memoria.");
+    }
+  }
+
+  transcriptContents.push({
+    text: transcriptPrompt
+  });
+
+  console.log("[PIPELINE] Querying Gemini 3.5 Flash for high-fidelity transcription (Stage 1)...");
+  const transcriptResponse = await generateWithFallback({
+    model: "gemini-3.5-flash",
+    contents: transcriptContents,
+    config: {
+      temperature: 0.1, // low temperature for precise transcription
+    }
+  });
+
+  const transcriptText = transcriptResponse.text;
+  if (!transcriptText) {
+    throw new Error("Gemini no pudo generar la transcripción del audio.");
+  }
+  return transcriptText;
+}
+
 async function executeAudioProcessing(
   localFilePath: string,
   mimeType: string,
@@ -698,60 +780,67 @@ async function executeAudioProcessing(
       await logToSession(sessionId, "UPLOAD", "Modo Vertex AI: utilizando URI de GCS directamente.", 50);
     }
 
-    // 3. Etapa 1: Transcripción y Diarización de Alta Precisión con Gemini Multimodal (Dual-Pass Stage 1)
-    await logToSession(sessionId, "STT_API", "Etapa 1/2: Iniciando transcripción y separación de voces nativa con Gemini 2.5...", 60);
-
-    const transcriptPrompt = `Analyze the attached audio file: "${fileName}".
-Generate a complete, high-fidelity transcription of the spoken conversation.
-You MUST separate different speakers (Speaker Diarization) and tag them clearly (e.g. Speaker 1, Speaker 2, Speaker 3).
-Provide precise timing markers/timestamps (e.g., [00:15], [02:30]) at the beginning of each dialogue segment or when the speaker changes or a new topic starts.
-
-CRITICAL LANGUAGE REQUIREMENT: Transcribe exactly what is spoken. If the audio is in Spanish, the transcript MUST be in Spanish. If it is in English, the transcript MUST be in English. Do not translate the spoken words during transcription.`;
-
-    const transcriptContents: any[] = [];
-    if (geminiFileUri) {
-      transcriptContents.push({
-        fileData: {
-          fileUri: geminiFileUri,
-          mimeType: uploadMime,
-        }
-      });
-    } else {
-      // Base64 inline fallback for smaller files if upload failed completely
-      const fileStats = fs.existsSync(processedFilePath) ? fs.statSync(processedFilePath) : null;
-      if (fileStats && fileStats.size < 20 * 1024 * 1024) {
-        console.log(`[PIPELINE] Using Base64 inlineData fallback (File size: ${Math.round(fileStats.size / 1024 / 1024)}MB)...`);
-        const base64Content = fs.readFileSync(processedFilePath).toString("base64");
-        transcriptContents.push({
-          inlineData: {
-            mimeType: uploadMime,
-            data: base64Content
+    // 3. Etapa 1: Transcripción y Diarización de Alta Precisión (Dual-Pass Stage 1)
+    if (processingMode === "turbo" && gcsUri) {
+      // Turbo mode: Transcribe with Google Cloud Speech-to-Text V1
+      await logToSession(sessionId, "STT_API", "Modo Turbo: Iniciando transcripción rápida con Google Cloud Speech-to-Text...", 60);
+      try {
+        // Transcode to WAV for optimal STT accuracy
+        const wavTempPath = path.join(os.tmpdir(), `${sessionId}_transcoded.wav`);
+        const transcoded = await transcodeToWav(processedFilePath, wavTempPath);
+        let sttGcsUri = gcsUri;
+        
+        if (transcoded) {
+          const wavDestination = `audios/${sessionId}_transcoded.wav`;
+          const uploadedWav = await uploadToGCS(wavTempPath, wavDestination, "audio/wav");
+          if (uploadedWav) {
+            sttGcsUri = uploadedWav;
           }
-        });
+          try { fs.unlinkSync(wavTempPath); } catch {}
+        }
+        
+        finalTranscript = await transcribeAudioWithChirp2(sttGcsUri, "audio/wav", transcoded);
+        await logToSession(sessionId, "STT_API", "Transcripción rápida con Google Cloud STT completada con éxito.", 75);
+      } catch (sttErr: any) {
+        console.warn("[PIPELINE STT ERROR] Turbo mode Speech-to-Text failed. Falling back to Gemini Multimodal:", sttErr);
+        await logToSession(sessionId, "STT_API", "Falla en Speech-to-Text, usando fallback nativo de Gemini...", 65);
+        finalTranscript = await runGeminiTranscription(ai, geminiFileUri, uploadMime, fileName, processedFilePath);
+        await logToSession(sessionId, "STT_API", "Transcripción con Gemini de respaldo completada.", 75);
+      }
+    } else {
+      // High-Fidelity mode: Transcribe with Gemini Multimodal
+      await logToSession(sessionId, "STT_API", "Etapa 1/2: Iniciando transcripción y separación de voces nativa con Gemini 2.5...", 60);
+      finalTranscript = await runGeminiTranscription(ai, geminiFileUri, uploadMime, fileName, processedFilePath);
+      
+      // Automatic loop detection & self-healing recovery using Google Cloud STT!
+      if (isTranscriptLooping(finalTranscript)) {
+        console.warn(`[PIPELINE LOOP DETECTED] Transcript for session ${sessionId} is looping! Attempting self-healing recovery via Google Cloud STT...`);
+        await logToSession(sessionId, "STT_RECOVERY", "Detección de bucle de repetición en Gemini. Iniciando auto-recuperación de alta precisión con Google Cloud STT...", 70);
+        try {
+          const wavTempPath = path.join(os.tmpdir(), `${sessionId}_recovery.wav`);
+          const transcoded = await transcodeToWav(processedFilePath, wavTempPath);
+          let sttGcsUri = gcsUri;
+          
+          if (transcoded) {
+            const wavDestination = `audios/${sessionId}_recovery.wav`;
+            const uploadedWav = await uploadToGCS(wavTempPath, wavDestination, "audio/wav");
+            if (uploadedWav) {
+              sttGcsUri = uploadedWav;
+            }
+            try { fs.unlinkSync(wavTempPath); } catch {}
+          }
+          
+          finalTranscript = await transcribeAudioWithChirp2(sttGcsUri, "audio/wav", transcoded);
+          console.log(`[PIPELINE RECOVERY] Successfully recovered transcript with length: ${finalTranscript.length}`);
+          await logToSession(sessionId, "STT_RECOVERY", "Auto-recuperación exitosa con Google Cloud STT.", 75);
+        } catch (recoveryErr: any) {
+          console.error("[PIPELINE RECOVERY FAILED] Failed to recover transcript using STT:", recoveryErr);
+          await logToSession(sessionId, "STT_RECOVERY", "No se pudo auto-recuperar con STT. Continuando con el borrador inicial.", 75);
+        }
       } else {
-        throw new Error("No se pudo subir el archivo de audio a la nube y el archivo local es demasiado grande para procesarse en memoria.");
+        await logToSession(sessionId, "STT_API", "Transcripción y separación de voces completada con éxito.", 75);
       }
     }
-
-    transcriptContents.push({
-      text: transcriptPrompt
-    });
-
-    console.log("[PIPELINE] Querying Gemini 2.5 Flash for high-fidelity transcription (Stage 1)...");
-    const transcriptResponse = await generateWithFallback({
-      model: "gemini-2.5-flash",
-      contents: transcriptContents,
-      config: {
-        temperature: 0.1, // low temperature for precise transcription
-      }
-    });
-
-    finalTranscript = transcriptResponse.text;
-    if (!finalTranscript) {
-      throw new Error("Gemini no pudo generar la transcripción del audio.");
-    }
-    console.log(`[PIPELINE] Stage 1 Transcription complete. Length: ${finalTranscript.length} characters.`);
-    await logToSession(sessionId, "STT_API", "Transcripción y separación de voces completada con éxito.", 75);
 
     // 4. Etapa 2: Síntesis Estructurada y Mapeo Real (Dual-Pass Stage 2)
     let parsedStudySession: any = null;
@@ -778,11 +867,11 @@ Generate fully populated results in JSON format according to the summaryResponse
 
 CRITICAL LANGUAGE REQUIREMENT: All output text (including title, summary, and action items) MUST be strictly in the detected language of the source transcript. If the transcript is in Spanish, the entire JSON output MUST be in Spanish. DO NOT respond in English if the source is in Spanish.`;
 
-    console.log("[PIPELINE] Querying Gemini 2.5 Flash for complete structured summary and speaker mapping (Stage 2)...");
+    console.log("[PIPELINE] Querying Gemini 3.5 Flash for complete structured summary and speaker mapping (Stage 2)...");
     await logToSession(sessionId, "STAGE_1", "Etapa 2/2: Sintetizando informe estructurado, metas y mapeando oradores reales...", 85);
     
     const stage2Response = await generateWithFallback({
-      model: "gemini-2.5-flash",
+      model: "gemini-3.5-flash",
       contents: [{ text: stage2Prompt }],
       config: {
         responseMimeType: "application/json",
@@ -1486,7 +1575,7 @@ PROTECTORES ABSOLUTOS DE ANTI-ALUCINACIÓN (CRITICAL GROUNDING CONSTRAINTS):
     });
 
     const response = await generateWithFallback({
-      model: "gemini-2.5-flash",
+      model: "gemini-3.5-flash",
       contents: formattedContents,
       config: {
         systemInstruction: systemInstruction,
@@ -1759,7 +1848,7 @@ app.post("/api/process", async (req, res) => {
 
       console.log("[SAMPLE PROCESS] Generating study companion from Gemini for topic:", topicTitle);
       const response = await generateWithFallback({
-        model: "gemini-2.5-flash",
+        model: "gemini-3.5-flash",
         contents: contentsPayload,
         config: {
           responseMimeType: "application/json",
@@ -2066,7 +2155,7 @@ app.post("/api/upload-file", upload.single("file"), async (req, res) => {
 
           console.log("[UPLOAD-FILE BG] Generating study companion from Gemini...");
           const response = await generateWithFallback({
-            model: "gemini-2.5-flash",
+            model: "gemini-3.5-flash",
             contents: contentsPayload,
             config: {
               responseMimeType: "application/json",
@@ -2386,7 +2475,7 @@ app.post("/api/merge-chunks", async (req, res) => {
           currentResponseSchema.properties.summary.description = `A beautifully detailed markdown executive summary structured strictly following the layout, headers, blockquotes, and lists of this template:\n${selectedTemplate.prompt}`;
 
           const response = await generateWithFallback({
-            model: "gemini-2.5-flash",
+            model: "gemini-3.5-flash",
             contents: contentsPayload,
             config: {
               responseMimeType: "application/json",
@@ -2766,7 +2855,7 @@ CRITICAL REQUIREMENT: You MUST automatically detect the language used in the sou
 
     console.log(`[AI SYNTHESIS] Dispatching compilation request to Gemini for folder "${folder.name}"...`);
     const response = await generateWithFallback({
-      model: "gemini-2.5-flash",
+      model: "gemini-3.1-pro",
       contents: [{ text: prompt }],
       config: {
         temperature: 0.2
