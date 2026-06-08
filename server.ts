@@ -779,13 +779,104 @@ export function sanitizeActionItems(items: any[]): any[] {
   });
 }
 
+async function getAudioDuration(filePath: string): Promise<number> {
+  try {
+    const { stdout } = await execPromise(`ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 "${filePath}"`);
+    const duration = parseFloat(stdout.trim());
+    return isNaN(duration) ? 0 : duration;
+  } catch (err) {
+    console.warn("[DURATION WARNING] Failed to read duration with ffprobe:", err);
+    return 0;
+  }
+}
+
 async function runGeminiTranscription(
   ai: any,
   geminiFileUri: string,
   uploadMime: string,
   fileName: string,
-  processedFilePath: string
+  processedFilePath: string,
+  sessionId?: string
 ): Promise<string> {
+  const fmtTime = (secs: number) => {
+    const h = Math.floor(secs / 3600);
+    const m = Math.floor((secs % 3600) / 60);
+    const s = Math.floor(secs % 60);
+    const pad = (n: number) => n.toString().padStart(2, "0");
+    return `${pad(h)}:${pad(m)}:${pad(s)}`;
+  };
+
+  const durationSec = await getAudioDuration(processedFilePath);
+  console.log(`[PIPELINE] Detected audio file duration: ${durationSec} seconds (${fmtTime(durationSec)}).`);
+
+  const CHUNK_SIZE_SEC = 15 * 60; // 15-minute segments
+  if (durationSec > CHUNK_SIZE_SEC && geminiFileUri) {
+    console.log(`[PIPELINE] File is longer than 15 minutes. Initiating sequential sliding-window chunked transcription...`);
+    if (sessionId) {
+      await logToSession(sessionId, "STT_API", `Audio de larga duración detectado (${fmtTime(durationSec)}). Iniciando transcripción fragmentada de fondo...`, 62);
+    }
+
+    const segmentsCount = Math.ceil(durationSec / CHUNK_SIZE_SEC);
+    const transcripts: string[] = [];
+
+    for (let i = 0; i < segmentsCount; i++) {
+      const start = i * CHUNK_SIZE_SEC;
+      const end = Math.min((i + 1) * CHUNK_SIZE_SEC, durationSec);
+      
+      console.log(`[PIPELINE] Transcribing segment ${i + 1}/${segmentsCount} (${fmtTime(start)} - ${fmtTime(end)})...`);
+      if (sessionId) {
+        await logToSession(sessionId, "STT_API", `Transcribiendo segmento ${i + 1} de ${segmentsCount} (${fmtTime(start)} - ${fmtTime(end)})...`, Math.round(62 + (i / segmentsCount) * 12));
+      }
+
+      const segmentPrompt = `Analyze the attached audio file: "${fileName}".
+You MUST only transcribe the audio segment starting from ${fmtTime(start)} and ending at ${fmtTime(end)}.
+Do NOT transcribe any other part of the file.
+
+STRICT TIMESTAMP FORMAT RULE:
+- You MUST only output standard segment-level timestamps in [HH:MM:SS] format (e.g., "[00:01:23]") at the beginning of each dialogue line.
+- Offset your timestamps to reflect the actual time relative to the start of the whole file (i.e. start at ${fmtTime(start)}).
+- Do NOT output millisecond-level timestamps (such as "0m0s", "ms", or "nanos") under any circumstances.
+- Example of correct output format:
+  [${fmtTime(start + 15)}] Speaker 1: Hola, bienvenidos al consultorio.
+  [${fmtTime(start + 32)}] Speaker 2: Gracias doctor, me duele un poco la cabeza.
+
+CRITICAL REPETITION & COMPLETENESS RULE:
+- Transcribe this specific segment from start to finish linearly. Do not get stuck in a repetitive loop.
+- You MUST separate different speakers (Speaker Diarization) and tag them clearly (e.g., Speaker 1, Speaker 2, Speaker 3).
+- Continue transcribing until the end of this segment (${fmtTime(end)}). Ensure this segment's transcript is 100% complete.
+
+CRITICAL LANGUAGE REQUIREMENT: Transcribe exactly what is spoken. If the audio is in Spanish, the transcript MUST be in Spanish. If it is in English, the transcript MUST be in English. Do not translate the spoken words during transcription.`;
+
+      const contentsPayload = [
+        {
+          fileData: {
+            fileUri: geminiFileUri,
+            mimeType: uploadMime,
+          }
+        },
+        { text: segmentPrompt }
+      ];
+
+      const response = await generateWithFallback({
+        model: "gemini-3.5-flash",
+        contents: contentsPayload,
+        config: {
+          temperature: 0.1,
+        }
+      });
+
+      const chunkText = response.text;
+      if (chunkText) {
+        transcripts.push(chunkText.trim());
+      }
+    }
+
+    const fullTranscript = transcripts.join("\n\n");
+    console.log(`[PIPELINE] Completed sequential sliding-window transcription. Total length: ${fullTranscript.length} characters.`);
+    return fullTranscript;
+  }
+
+  // Fallback for short files (<15 mins) or if geminiFileUri is missing
   const transcriptPrompt = `Analyze the attached audio file: "${fileName}".
 Generate a complete, high-fidelity transcription of the spoken conversation.
 You MUST separate different speakers (Speaker Diarization) and tag them clearly (e.g. Speaker 1, Speaker 2, Speaker 3).
@@ -836,7 +927,7 @@ CRITICAL LANGUAGE REQUIREMENT: Transcribe exactly what is spoken. If the audio i
     model: "gemini-3.5-flash",
     contents: transcriptContents,
     config: {
-      temperature: 0.1, // low temperature for precise transcription
+      temperature: 0.1,
     }
   });
 
@@ -938,13 +1029,13 @@ async function executeAudioProcessing(
       } catch (sttErr: any) {
         console.warn("[PIPELINE STT ERROR] Turbo mode Speech-to-Text failed. Falling back to Gemini Multimodal:", sttErr);
         await logToSession(sessionId, "STT_API", "Falla en Speech-to-Text, usando fallback nativo de Gemini...", 65);
-        finalTranscript = await runGeminiTranscription(ai, geminiFileUri, uploadMime, fileName, processedFilePath);
+        finalTranscript = await runGeminiTranscription(ai, geminiFileUri, uploadMime, fileName, processedFilePath, sessionId);
         await logToSession(sessionId, "STT_API", "Transcripción con Gemini de respaldo completada.", 75);
       }
     } else {
       // High-Fidelity mode: Transcribe with Gemini Multimodal
       await logToSession(sessionId, "STT_API", "Etapa 1/2: Iniciando transcripción y separación de voces nativa con Gemini 3.5...", 60);
-      finalTranscript = await runGeminiTranscription(ai, geminiFileUri, uploadMime, fileName, processedFilePath);
+      finalTranscript = await runGeminiTranscription(ai, geminiFileUri, uploadMime, fileName, processedFilePath, sessionId);
       
       // Automatic loop detection & self-healing recovery using Google Cloud STT!
       if (isTranscriptLooping(finalTranscript)) {
