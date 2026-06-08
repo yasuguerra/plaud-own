@@ -789,11 +789,17 @@ async function runGeminiTranscription(
   const transcriptPrompt = `Analyze the attached audio file: "${fileName}".
 Generate a complete, high-fidelity transcription of the spoken conversation.
 You MUST separate different speakers (Speaker Diarization) and tag them clearly (e.g. Speaker 1, Speaker 2, Speaker 3).
-Provide timing markers/timestamps (e.g., [01:23], [05:45]) at the beginning of each dialogue segment or when the speaker changes or a new topic starts.
 
-CRITICAL TIMESTAMPS RULE: Do NOT output word-level timestamps or millisecond-level timestamps (e.g., do NOT output "[ 0m4s166ms ]" or "[ 0m5s6ms ]"). Only output segment-level timestamps in [MM:SS] format at the beginning of each line or speaker change.
+STRICT TIMESTAMP FORMAT RULE:
+- You MUST only output standard segment-level timestamps in [HH:MM:SS] format (e.g., "[00:01:23]") at the beginning of each dialogue line.
+- Do NOT output millisecond-level timestamps (such as "0m0s", "ms", or "nanos") under any circumstances.
+- Example of correct output:
+  [00:00:15] Speaker 1: Hola, bienvenidos al consultorio.
+  [00:00:32] Speaker 2: Gracias doctor, me duele un poco la cabeza.
 
-CRITICAL REPETITION RULE: Avoid getting stuck in an infinite loop repeating the same transcription phrases. If there is a silence, pause, static, or repetitive background noise in the audio, do NOT repeat previous words. Always proceed linearly from the start of the audio to the end.
+CRITICAL REPETITION & COMPLETENESS RULE:
+- Transcribe the entire audio from start to finish linearly. Do not get stuck in a repetitive loop.
+- Continue transcribing until the absolute end of the file. Ensure the transcript is complete.
 
 CRITICAL LANGUAGE REQUIREMENT: Transcribe exactly what is spoken. If the audio is in Spanish, the transcript MUST be in Spanish. If it is in English, the transcript MUST be in English. Do not translate the spoken words during transcription.`;
 
