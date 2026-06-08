@@ -1,5 +1,5 @@
 import { describe, test, expect } from "vitest";
-import { formatTime, getExtensionFromMimeType, FailSafeFirestore, isTranscriptLooping } from "./server";
+import { formatTime, getExtensionFromMimeType, FailSafeFirestore, isTranscriptLooping, sanitizeActionItems } from "./server";
 
 describe("server.ts utility tests", () => {
   test("formatTime works correctly", () => {
@@ -140,5 +140,34 @@ describe("FailSafeFirestore tests", () => {
     expect(docUpdated.data()?.progress).toBe(10);
     expect(docUpdated.data()?.logs.length).toBe(1);
     expect(docUpdated.data()?.logs[0].stage).toBe("START");
+  });
+});
+
+describe("sanitizeActionItems tests", () => {
+  test("successfully injects unique IDs and properties into action items", () => {
+    const rawItems = [
+      { task: "Hacer triaje predictivo", importance: "high" },
+      { task: "Probar recetas electrónicas", importance: "medium" },
+      "Imprimir recibos portátiles"
+    ];
+
+    const sanitized = sanitizeActionItems(rawItems);
+
+    expect(sanitized.length).toBe(3);
+    
+    // Assert all have non-empty unique IDs
+    expect(sanitized[0].id).toBeDefined();
+    expect(sanitized[1].id).toBeDefined();
+    expect(sanitized[2].id).toBeDefined();
+    expect(sanitized[0].id).not.toBe(sanitized[1].id);
+    expect(sanitized[0].id).not.toBe(sanitized[2].id);
+
+    // Assert completed property and dueDate property exist
+    expect(sanitized[0].completed).toBe(false);
+    expect(sanitized[0].dueDate).toBeDefined();
+
+    // Assert task text formatting for string inputs
+    expect(sanitized[2].task).toBe("Imprimir recibos portátiles");
+    expect(sanitized[2].importance).toBe("medium"); // default fallback
   });
 });
