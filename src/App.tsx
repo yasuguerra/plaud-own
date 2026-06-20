@@ -36,9 +36,10 @@ import ActionItemsList from "./components/ActionItemsList";
 import ChatBuddy from "./components/ChatBuddy";
 import SidebarHistory from "./components/SidebarHistory";
 import InfographicsDashboard from "./components/InfographicsDashboard";
+import FolderDashboard from "./components/FolderDashboard";
 
 // Simple reliable custom Markdown formatter component for React 19 compatibility
-function FormatMarkdown({ text }: { text: string }) {
+export function FormatMarkdown({ text }: { text: string }) {
   if (!text) return null;
   const lines = text.split("\n");
   return (
@@ -1414,9 +1415,21 @@ This workspace was custom-curated in **⚡ Turbo Fast-Track Mode** to bypass bro
   };
 
   const handleUpdateChatHistory = (history: ChatMessage[]) => {
-    if (!activeSession) return;
-    const updatedSession = { ...activeSession, chatHistory: history };
-    saveSessions(sessions.map(s => s.id === activeSession.id ? updatedSession : s));
+    if (activeSession) {
+      const updatedSession = { ...activeSession, chatHistory: history };
+      saveSessions(sessions.map(s => s.id === activeSession.id ? updatedSession : s));
+    } else if (activeFolderId) {
+      const updatedFolders = folders.map(f => {
+        if (f.id === activeFolderId) {
+          return { ...f, chatHistory: history };
+        }
+        return f;
+      });
+      setFolders(updatedFolders);
+      if (userProfile) {
+        saveCustomFoldersToFirebase(userProfile.uid, updatedFolders);
+      }
+    }
   };
 
   const handleRenameSpeaker = (rawSpeakerName: string, newName: string) => {
@@ -1981,112 +1994,17 @@ This workspace was custom-curated in **⚡ Turbo Fast-Track Mode** to bypass bro
                     </div>
                   </div>
 
-                  {/* Topic Folders (Temas) widget */}
-                  <div className="border-t border-slate-100 pt-5 space-y-4">
-                    <div className="flex items-center justify-between">
-                      <div className="flex items-center gap-1.5">
-                        <FolderTree className="h-4 w-4 text-indigo-500" />
-                        <span className="text-[10px] font-bold uppercase text-slate-400 tracking-wider">Temas de Reunión</span>
-                      </div>
-                      <button 
-                        onClick={() => {
-                          const name = prompt("Ingrese el nombre del nuevo Tema:");
-                          if (name && name.trim()) handleCreateFolder(name);
-                        }}
-                        className="text-[10px] font-bold text-indigo-600 hover:text-indigo-800 transition flex items-center gap-0.5 cursor-pointer"
-                      >
-                        + Nuevo
-                      </button>
-                    </div>
-
-                    <div className="flex flex-col gap-1.5 max-h-[140px] overflow-y-auto pr-1">
-                      <button
-                        onClick={() => setActiveFolderId(null)}
-                        className={`text-left text-xs font-semibold px-2.5 py-1.5 rounded-lg transition flex items-center justify-between cursor-pointer ${
-                          activeFolderId === null 
-                            ? "bg-indigo-50 text-indigo-700" 
-                            : "text-slate-600 hover:bg-slate-50"
-                        }`}
-                      >
-                        <span className="truncate">📂 Todos los Temas</span>
-                        <span className="text-[10px] text-slate-400">({sessions.length})</span>
-                      </button>
-
-                      {folders.map(folder => {
-                        const folderSessions = sessions.filter(s => s.folderId === folder.id);
-                        const isSelected = activeFolderId === folder.id;
-                        return (
-                          <button
-                            key={folder.id}
-                            onClick={() => setActiveFolderId(folder.id)}
-                            className={`text-left text-xs font-semibold px-2.5 py-1.5 rounded-lg transition flex items-center justify-between cursor-pointer ${
-                              isSelected 
-                                ? "bg-indigo-50 text-indigo-700" 
-                                : "text-slate-600 hover:bg-slate-50"
-                            }`}
-                          >
-                            <span className="truncate">📂 {folder.name}</span>
-                            <span className="text-[10px] text-slate-400">({folderSessions.length})</span>
-                          </button>
-                        );
-                      })}
-                    </div>
-
-                    {/* AI Folder Curation Widget */}
-                    {activeFolderId && (() => {
-                      const currentFolder = folders.find(f => f.id === activeFolderId);
-                      if (!currentFolder) return null;
-                      const folderSessions = sessions.filter(s => s.folderId === currentFolder.id);
-
-                      return (
-                        <div className="border border-indigo-100 bg-indigo-50/40 p-4 rounded-xl space-y-2.5 animate-fade-in">
-                          <div className="flex items-center justify-between">
-                            <h4 className="font-bold text-slate-800 text-[10px] uppercase tracking-wider">Inteligencia de Tema</h4>
-                            <span className="text-[8px] text-indigo-600 bg-indigo-100/60 px-2 py-0.5 rounded-full font-bold">Activo</span>
-                          </div>
-                          <p className="text-[10px] text-slate-500 leading-relaxed font-semibold">
-                            Combina los resúmenes de las {folderSessions.length} reuniones de este tema para obtener un informe consolidado por la IA.
-                          </p>
-
-                          {currentFolder.aiSynthesis ? (
-                            <button
-                              onClick={() => {
-                                setSelectedSynthesisFolderId(currentFolder.id);
-                              }}
-                              className="w-full bg-white border border-indigo-150 text-indigo-700 text-[10px] font-bold py-1.5 rounded-lg hover:bg-indigo-100/30 transition flex items-center justify-center gap-1 shadow-2xs cursor-pointer"
-                            >
-                              📖 Leer Síntesis de Tema con IA
-                            </button>
-                          ) : (
-                            <button
-                              disabled={folderSessions.length === 0 || isSynthesizingFolder}
-                              onClick={() => handleSynthesizeFolder(currentFolder.id)}
-                              className="w-full bg-indigo-600 text-white text-[10px] font-bold py-1.5 rounded-lg hover:bg-indigo-700 transition flex items-center justify-center gap-1 disabled:opacity-50 disabled:cursor-not-allowed cursor-pointer"
-                            >
-                              {isSynthesizingFolder ? (
-                                <>
-                                  <Loader2 className="h-3 w-3 animate-spin text-white" />
-                                  Sintetizando Tema...
-                                </>
-                              ) : (
-                                <>
-                                  ✨ Sintetizar Tema con IA
-                                </>
-                              )}
-                            </button>
-                          )}
-                        </div>
-                      );
-                    })()}
-                  </div>
-
-                  {/* Saved Study Library list widget */}
-                  <div className="border-t border-slate-100 pt-5 mt-auto">
+                  <div className="flex-1 min-h-0">
                     <SidebarHistory 
-                      sessions={activeFolderId ? sessions.filter(s => s.folderId === activeFolderId) : sessions} 
+                      sessions={sessions} 
                       activeSessionId={activeSessionId}
                       onSelectSession={(id) => { setActiveSessionId(id); setActiveTab("summary"); }}
                       onDeleteSession={handleDeleteSession}
+                      folders={folders}
+                      activeFolderId={activeFolderId}
+                      onSelectFolder={setActiveFolderId}
+                      onCreateFolder={handleCreateFolder}
+                      onMoveSession={handleMoveSessionToFolder}
                     />
                   </div>
                 </div>
@@ -2380,38 +2298,6 @@ This workspace was custom-curated in **⚡ Turbo Fast-Track Mode** to bypass bro
               </div>
             </div>
 
-            {/* AI Assistant Sliding Slide-Over Drawer */}
-            <div 
-              className={`fixed right-0 top-16 bottom-0 w-80 sm:w-[390px] bg-white border-l border-slate-200/80 shadow-2xl z-30 transition-transform duration-300 ease-in-out flex flex-col ${
-                isChatOpen ? "translate-x-0" : "translate-x-full"
-              }`}
-            >
-              <div className="flex-1 min-h-0 relative flex flex-col">
-                <ChatBuddy 
-                  session={activeSession} 
-                  onUpdateChatHistory={handleUpdateChatHistory}
-                />
-                
-                {/* Floating internal close handle button */}
-                <button
-                  onClick={() => setIsChatOpen(false)}
-                  className="absolute top-4 right-12 text-slate-400 hover:text-slate-600 transition p-1.5 rounded-lg hover:bg-slate-50 cursor-pointer"
-                  title="Close AI helper"
-                >
-                  ✕
-                </button>
-              </div>
-            </div>
-
-            {/* General Floating Ask IA Action Button for convenience */}
-            <button
-              onClick={() => setIsChatOpen(!isChatOpen)}
-              className="fixed right-6 bottom-6 z-20 h-12 w-12 rounded-full bg-slate-900 text-white shadow-xl flex items-center justify-center hover:bg-indigo-600 hover:scale-105 active:scale-95 transition-all duration-150 cursor-pointer"
-              title="Consultar con IA"
-            >
-              <Sparkles className="h-5 w-5 animate-pulse" />
-            </button>
-
           </section>
         ) : (
           /* SECTION B: NO active study session - Welcome & uploader suite */
@@ -2459,74 +2345,24 @@ This workspace was custom-curated in **⚡ Turbo Fast-Track Mode** to bypass bro
                   </div>
                 ) : (
                   /* Standard Explorer Panel (History & Folders) */
-                  <div className="space-y-6 animate-fade-in flex flex-col h-full">
-                    {/* Topic Folders (Temas) widget */}
-                    <div className="space-y-4">
-                      <div className="flex items-center justify-between">
-                        <div className="flex items-center gap-1.5">
-                          <FolderTree className="h-4 w-4 text-indigo-500" />
-                          <span className="text-[10px] font-bold uppercase text-slate-400 tracking-wider">Temas de Reunión</span>
-                        </div>
-                        <button 
-                          onClick={() => {
-                            const name = prompt("Ingrese el nombre del nuevo Tema:");
-                            if (name && name.trim()) handleCreateFolder(name);
-                          }}
-                          className="text-[10px] font-bold text-indigo-600 hover:text-indigo-800 transition flex items-center gap-0.5 cursor-pointer"
-                        >
-                          + Nuevo
-                        </button>
-                      </div>
-
-                      <div className="flex flex-col gap-1.5 max-h-[140px] overflow-y-auto pr-1">
-                        <button
-                          onClick={() => setActiveFolderId(null)}
-                          className={`text-left text-xs font-semibold px-2.5 py-1.5 rounded-lg transition flex items-center justify-between cursor-pointer ${
-                            activeFolderId === null 
-                              ? "bg-indigo-50 text-indigo-700" 
-                              : "text-slate-600 hover:bg-slate-50"
-                          }`}
-                        >
-                          <span className="truncate">📂 Todos los Temas</span>
-                          <span className="text-[10px] text-slate-400">({sessions.length})</span>
-                        </button>
-
-                        {folders.map(folder => {
-                          const folderSessions = sessions.filter(s => s.folderId === folder.id);
-                          const isSelected = activeFolderId === folder.id;
-                          return (
-                            <button
-                              key={folder.id}
-                              onClick={() => setActiveFolderId(folder.id)}
-                              className={`text-left text-xs font-semibold px-2.5 py-1.5 rounded-lg transition flex items-center justify-between cursor-pointer ${
-                                isSelected 
-                                  ? "bg-indigo-50 text-indigo-700" 
-                                  : "text-slate-600 hover:bg-slate-50"
-                              }`}
-                            >
-                              <span className="truncate">📂 {folder.name}</span>
-                              <span className="text-[10px] text-slate-400">({folderSessions.length})</span>
-                            </button>
-                          );
-                        })}
-                      </div>
-                    </div>
-
-                    {/* Saved Study Library list widget */}
-                    <div className="border-t border-slate-100 pt-5 mt-auto">
-                      <SidebarHistory 
-                        sessions={activeFolderId ? sessions.filter(s => s.folderId === activeFolderId) : sessions} 
-                        activeSessionId={activeSessionId}
-                        onSelectSession={(id) => { setActiveSessionId(id); setActiveTab("summary"); }}
-                        onDeleteSession={handleDeleteSession}
-                      />
-                    </div>
+                  <div className="flex-1 min-h-0">
+                    <SidebarHistory 
+                      sessions={sessions} 
+                      activeSessionId={activeSessionId}
+                      onSelectSession={(id) => { setActiveSessionId(id); setActiveTab("summary"); }}
+                      onDeleteSession={handleDeleteSession}
+                      folders={folders}
+                      activeFolderId={activeFolderId}
+                      onSelectFolder={setActiveFolderId}
+                      onCreateFolder={handleCreateFolder}
+                      onMoveSession={handleMoveSessionToFolder}
+                    />
                   </div>
                 )}
               </div>
             )}
 
-            {/* Column 2: Centered Ingestion Card Area */}
+            {/* Column 2: Centered Ingestion Card Area OR Folder Dashboard */}
             <div className={`col-span-12 ${(isSidebarCollapsed || isSharedMode) ? "lg:col-span-12" : "lg:col-span-9"} bg-slate-50/50 p-6 md:p-12 overflow-y-auto h-full flex items-center justify-center relative`}>
               
               {/* Sidebar toggle handle button */}
@@ -2540,9 +2376,20 @@ This workspace was custom-curated in **⚡ Turbo Fast-Track Mode** to bypass bro
               </button>
               )}
 
-              {/* Center aligned Apple-style Minimal Ingestion Card */}
-              <div className="max-w-xl w-full bg-white border border-slate-200/80 rounded-3xl p-8 md:p-10 shadow-sm flex flex-col gap-6 animate-fade-in">
-              <div className="text-center space-y-1.5">
+              {activeFolderId !== null ? (
+                // --- FOLDER DASHBOARD VIEW ---
+                <FolderDashboard 
+                  folder={folders.find(f => f.id === activeFolderId)!} 
+                  sessions={sessions.filter(s => s.folderId === activeFolderId)} 
+                  isSynthesizing={isSynthesizingFolder} 
+                  onSynthesize={handleSynthesizeFolder} 
+                  FormatMarkdown={FormatMarkdown}
+                  onSelectSession={(id) => { setActiveSessionId(id); setActiveFolderId(null); setActiveTab("summary"); }}
+                />
+              ) : (
+                // --- CENTER ALIGNED UPLOAD / WELCOME CARD ---
+                <div className="max-w-xl w-full bg-white border border-slate-200/80 rounded-3xl p-8 md:p-10 shadow-sm flex flex-col gap-6 animate-fade-in">
+                <div className="text-center space-y-1.5">
                 <span className="text-[10px] font-bold uppercase text-indigo-600 tracking-widest bg-indigo-50 border border-indigo-100 px-3 py-1 rounded-full">
                   PLAUD Corporate Intelligence
                 </span>
@@ -3084,6 +2931,44 @@ This workspace was custom-curated in **⚡ Turbo Fast-Track Mode** to bypass bro
               </div>
             </div>
           </div>
+        )}
+
+        {/* AI Assistant Sliding Slide-Over Drawer - Global */}
+        <div 
+          className={`fixed right-0 top-16 bottom-0 w-80 sm:w-[390px] bg-white border-l border-slate-200/80 shadow-2xl z-30 transition-transform duration-300 ease-in-out flex flex-col ${
+            isChatOpen ? "translate-x-0" : "translate-x-full"
+          }`}
+        >
+          <div className="flex-1 min-h-0 relative flex flex-col">
+            <ChatBuddy 
+              session={activeSession} 
+              folderContext={!activeSession && activeFolderId ? {
+                folder: folders.find(f => f.id === activeFolderId)!,
+                sessions: sessions.filter(s => s.folderId === activeFolderId)
+              } : undefined}
+              onUpdateChatHistory={handleUpdateChatHistory}
+            />
+            
+            {/* Floating internal close handle button */}
+            <button
+              onClick={() => setIsChatOpen(false)}
+              className="absolute top-4 right-12 text-slate-400 hover:text-slate-600 transition p-1.5 rounded-lg hover:bg-slate-50 cursor-pointer"
+              title="Close AI helper"
+            >
+              ✕
+            </button>
+          </div>
+        </div>
+
+        {/* General Floating Ask IA Action Button for convenience */}
+        {(activeSessionId !== null || activeFolderId !== null) && (
+          <button
+            onClick={() => setIsChatOpen(!isChatOpen)}
+            className="fixed right-6 bottom-6 z-20 h-12 w-12 rounded-full bg-slate-900 text-white shadow-xl flex items-center justify-center hover:bg-indigo-600 hover:scale-105 active:scale-95 transition-all duration-150 cursor-pointer"
+            title="Consultar con IA"
+          >
+            <Sparkles className="h-5 w-5 animate-pulse" />
+          </button>
         )}
 
       </main>

@@ -1,25 +1,32 @@
 import React, { useState, useRef, useEffect } from "react";
-import { Send, Sparkles, MessageCircle, HelpCircle, Loader2, RefreshCw } from "lucide-react";
-import { ChatMessage, StudySession } from "../types";
+import { Send, Sparkles, MessageCircle, HelpCircle, Loader2, RefreshCw, FolderHeart } from "lucide-react";
+import { ChatMessage, StudySession, TopicFolder } from "../types";
 
 interface ChatBuddyProps {
-  session: StudySession;
+  session?: StudySession | null;
+  folderContext?: {
+    folder: TopicFolder;
+    sessions: StudySession[];
+  };
   onUpdateChatHistory: (updatedHistory: ChatMessage[]) => void;
 }
 
-export default function ChatBuddy({ session, onUpdateChatHistory }: ChatBuddyProps) {
+export default function ChatBuddy({ session, folderContext, onUpdateChatHistory }: ChatBuddyProps) {
   const [inputMsg, setInputMsg] = useState("");
   const [isSending, setIsSending] = useState(false);
   const [chatError, setChatError] = useState<string | null>(null);
 
   const listRef = useRef<HTMLDivElement>(null);
 
+  const currentHistory = folderContext ? (folderContext.folder.chatHistory || []) : (session?.chatHistory || []);
+  const currentTitle = folderContext ? `Carpeta: ${folderContext.folder.name}` : (session?.title || session?.mediaName || "Sesión General");
+
   // Auto Scroll to bottom when messages list updates
   useEffect(() => {
     if (listRef.current) {
       listRef.current.scrollTop = listRef.current.scrollHeight;
     }
-  }, [session.chatHistory]);
+  }, [currentHistory]);
 
   const handleSend = async (text: string) => {
     if (!text.trim() || isSending) return;
@@ -34,9 +41,17 @@ export default function ChatBuddy({ session, onUpdateChatHistory }: ChatBuddyPro
     };
 
     // Optimistically update lists on feed
-    const stagedHistory = [...session.chatHistory, newUserMsg];
+    const stagedHistory = [...currentHistory, newUserMsg];
     onUpdateChatHistory(stagedHistory);
     setInputMsg("");
+
+    let contextSummary = "";
+    if (folderContext) {
+      const allSummaries = folderContext.sessions.map((s, idx) => `--- Sesión ${idx + 1}: ${s.title || s.mediaName} ---\nResumen:\n${s.summary || ""}\n\nTranscripción:\n${s.transcript || ""}`).join("\n\n");
+      contextSummary = `ESTÁS ANALIZANDO UNA CARPETA ENTERA DE REUNIONES.\n\n` + (folderContext.folder.aiSynthesis ? `Resumen Global del Folder:\n${folderContext.folder.aiSynthesis}\n\n` : "") + `CONJUNTO DE SESIONES:\n${allSummaries}`;
+    } else if (session) {
+      contextSummary = (session.summary || "") + "\n\nTranscript: " + (session.transcript || "");
+    }
 
     try {
       const response = await fetch("/api/chat", {
@@ -44,9 +59,9 @@ export default function ChatBuddy({ session, onUpdateChatHistory }: ChatBuddyPro
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           message: text,
-          history: session.chatHistory.filter(m => m.id !== "welcome_msg"), // Pass clean history
-          contextSubject: session.title,
-          contextSummary: session.summary + "\n\nTranscript: " + (session.transcript || "")
+          history: currentHistory.filter(m => m.id !== "welcome_msg"), // Pass clean history
+          contextSubject: currentTitle,
+          contextSummary: contextSummary
         })
       });
 
@@ -89,7 +104,7 @@ export default function ChatBuddy({ session, onUpdateChatHistory }: ChatBuddyPro
       {
         id: "welcome_msg",
         role: "model" as const,
-        content: `¡Hola! He reiniciado nuestro diálogo. Estoy listo para responder cualquier duda sobre la reunión "${session.title}". Haz una pregunta o selecciona una opción de acceso rápido.`,
+        content: `¡Hola! He reiniciado nuestro diálogo. Estoy listo para responder cualquier duda sobre "${currentTitle}". Haz una pregunta o selecciona una opción de acceso rápido.`,
         timestamp: new Date().toISOString()
       }
     ];
@@ -101,10 +116,10 @@ export default function ChatBuddy({ session, onUpdateChatHistory }: ChatBuddyPro
       {/* Sidebar header */}
       <div className="p-4 border-b border-slate-50 flex items-center justify-between bg-gradient-to-r from-indigo-50/10 to-teal-50/10 rounded-t-2xl">
         <div className="flex items-center gap-2">
-          <Sparkles className="h-4.5 w-4.5 text-indigo-500 animate-pulse" />
+          {folderContext ? <FolderHeart className="h-4.5 w-4.5 text-indigo-500 animate-pulse" /> : <Sparkles className="h-4.5 w-4.5 text-indigo-500 animate-pulse" />}
           <div>
             <h3 className="font-sans text-sm font-bold text-slate-800">Asistente de IA</h3>
-            <p className="font-sans text-[10px] text-slate-400">Pregunta dudas, acuerdos o resúmenes</p>
+            <p className="font-sans text-[10px] text-slate-400">Contexto: <span className="font-bold truncate max-w-[120px] inline-block align-bottom">{currentTitle}</span></p>
           </div>
         </div>
         <button
@@ -121,7 +136,7 @@ export default function ChatBuddy({ session, onUpdateChatHistory }: ChatBuddyPro
         ref={listRef} 
         className="flex-1 overflow-y-auto p-4 space-y-4 max-h-[380px] min-h-[280px]"
       >
-        {session.chatHistory.map((msg) => (
+        {currentHistory.map((msg) => (
           <div
             key={msg.id}
             className={`flex flex-col ${msg.role === "user" ? "items-end" : "items-start"}`}
