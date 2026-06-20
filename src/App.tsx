@@ -2389,17 +2389,19 @@ This workspace was custom-curated in **⚡ Turbo Fast-Track Mode** to bypass bro
               ) : (
                 // --- CENTER ALIGNED UPLOAD / WELCOME CARD ---
                 <div className="max-w-xl w-full bg-white border border-slate-200/80 rounded-3xl p-8 md:p-10 shadow-sm flex flex-col gap-6 animate-fade-in">
-                <div className="text-center space-y-1.5">
-                <span className="text-[10px] font-bold uppercase text-indigo-600 tracking-widest bg-indigo-50 border border-indigo-100 px-3 py-1 rounded-full">
-                  PLAUD Corporate Intelligence
-                </span>
-                <h1 className="text-xl md:text-2xl font-black text-slate-900 tracking-tight mt-3">
-                  Plataforma de Ingesta
-                </h1>
-                <p className="text-xs text-slate-500 leading-relaxed font-sans max-w-sm mx-auto">
-                  Sube tus archivos multimedia o de texto para que la IA realice una transcripción diarizada y un resumen ejecutivo estructurado.
-                </p>
-              </div>
+                  <div className="text-center space-y-1.5">
+                    <span className="text-[10px] font-bold uppercase text-indigo-600 tracking-widest bg-indigo-50 border border-indigo-100 px-3 py-1 rounded-full">
+                      PLAUD Corporate Intelligence
+                    </span>
+                    <h1 className="text-xl md:text-2xl font-black text-slate-900 tracking-tight mt-3">
+                      Plataforma de Ingesta
+                    </h1>
+                    <p className="text-xs text-slate-500 leading-relaxed font-sans max-w-sm mx-auto">
+                      Sube tus archivos multimedia o de texto para que la IA realice una transcripción diarizada y un resumen ejecutivo estructurado.
+                    </p>
+                  </div>
+                </div>
+              )}
 
               {/* Premium Processing Mode Toggle */}
               <div className="bg-slate-50 border border-slate-100 p-3.5 rounded-2xl flex items-center justify-between gap-4 font-sans text-xs">
@@ -2633,8 +2635,6 @@ This workspace was custom-curated in **⚡ Turbo Fast-Track Mode** to bypass bro
               )}
 
             </div>
-
-          </div>
 
           </section>
         )}
