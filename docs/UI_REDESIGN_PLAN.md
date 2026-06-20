@@ -53,9 +53,11 @@ Para migrar nuestro prototipo actual hacia esta experiencia refinada y de clase 
 ### Fase 1: Rediseño del Layout General (Bifurcación Limpia)
 * **Acción**: Eliminar el grid actual de 3 columnas de la sección activa de la sesión (`col-span-12 lg:col-span-3`, `col-span-12 lg:col-span-5`, `col-span-12 lg:col-span-4`).
 * **Nuevo Layout**: 
-  - **Columna 1 (Ancho Fijo - 260px)**: Sidebar izquierdo que unifica la cuenta del usuario, la creación de temas/carpetas y el historial cronológico con duración en minutos/segundos.
-  - **Columna 2 (Flexible - Document-First Reader)**: Un gran contenedor central con un ancho máximo de lectura óptimo (ej. `max-w-4xl mx-auto`) dedicado al **Resumen Ejecutivo** o a la **Transcripción**, con pestañas minimalistas superiores ("Summary" | "Transcript").
-  - **Columna 3 (Flotante / Toggle Drawer)**: El Asistente de IA (Chat Buddy) y las Infografías se comportarán como un panel lateral derecho deslizable (Drawer) o una pestaña lateral que se activa con un botón discreto ("Ask AI" / "Ver Analíticas").
+  - **Columna 1 (Ancho Fijo - 260px)**: Sidebar izquierdo que unifica la cuenta del usuario, la gestión de carpetas (crear, agrupar sesiones) y el historial cronológico con duración en minutos/segundos.
+  - **Columna 2 (Flexible - Document-First Reader / Folder Dashboard)**: Un gran contenedor central con un ancho máximo de lectura óptimo (ej. `max-w-4xl mx-auto`).
+    - *Si se selecciona una Sesión*: Muestra el **Resumen Ejecutivo** o la **Transcripción**, con pestañas minimalistas superiores ("Summary" | "Transcript").
+    - *Si se selecciona una Carpeta*: Muestra un **Folder Dashboard**, con un resumen global, listado de sesiones contenidas, y botones de acción ("Generar Mapa Mental del Folder", "Generar Infografías") para desencadenar la carga bajo demanda (Lazy Generation).
+  - **Columna 3 (Flotante / Toggle Drawer)**: El Asistente de IA (Chat Buddy) y las analíticas de sesión individual se comportarán como un panel lateral derecho deslizable (Drawer) o una pestaña lateral que se activa con un botón discreto ("Ask AI" / "Ver Analíticas").
 
 ### Fase 2: Aplicación del Estilo Tipográfico y Espaciado PLAUD
 * **Acción**: Actualizar el componente de Markdown personalizado `FormatMarkdown` y el Timeline de Transcripción en [src/App.tsx](src/App.tsx) para usar la escala visual premium de PLAUD.

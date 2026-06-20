@@ -82,11 +82,13 @@ Se implementa la pila de APIs y modelos de última generación de Google para op
 *   **Procesador `Layout Parser`**: Este procesador avanzado de Document AI identifica de forma nativa la diferencia entre títulos, subtítulos, columnas, tablas financieras completas e incluso texto escrito a mano.
 *   **Beneficio**: Evita la degradación de texto de los extractores de PDF convencionales, entregando a los embeddings un documento con estructura lógica limpia.
 
-### 2.4 Vertex AI Vector Search (RAG Corporativo estilo NotebookLM)
+### 2.4 Vertex AI Vector Search & Knowledge Bases (Carpetas)
+*   **Gestión del Conocimiento (Folders)**: El sistema permite agrupar múltiples sesiones en "Carpetas" temáticas. Estas carpetas actúan como una Base de Conocimiento (Knowledge Base) consolidada al estilo NotebookLM.
+*   **Análisis a Nivel de Carpeta**: Los usuarios pueden interactuar con todas las sesiones de una carpeta simultáneamente. La generación de Mapas Mentales e Infografías a nivel de carpeta se realiza **bajo demanda** (Lazy Generation) para optimizar el consumo de tokens y costos de la API.
 *   **Segmentación (Chunking)**: Las transcripciones históricas y los documentos empresariales procesados por Document AI se segmentan en bloques semánticos de 500 tokens con un solapamiento del 10%.
 *   **Generación de Embeddings**: Cada bloque es convertido en un vector numérico de 768 dimensiones utilizando el modelo de última generación **Vertex AI `text-embedding-004`**.
 *   **Indexación Semántica**: Los vectores se almacenan en un índice de **Vertex AI Vector Search** con algoritmos de búsqueda del vecino más cercano aproximado (ANN) mediante grafos HNSW.
-*   **Grounding**: Al chatear en `ChatBuddy` sobre múltiples archivos, la IA realiza una búsqueda semántica de los vectores más relevantes, recupera los fragmentos lógicos de texto y genera respuestas 100% verídicas citando documentos e intervalos de tiempo exactos.
+*   **Grounding**: Al chatear en `ChatBuddy` sobre el contexto de una carpeta entera, la IA realiza una búsqueda semántica de los vectores más relevantes entre todas las reuniones de esa carpeta, recupera los fragmentos lógicos de texto y genera respuestas 100% verídicas citando sesiones exactas.
 
 ### 2.5 Google BigQuery (Repositorio de Auditoría y Analíticas de Colaboración)
 *   **Objetivo**: Almacenar de forma segura el histórico analítico y de control de las sesiones corporativas.
@@ -103,7 +105,8 @@ La experiencia del usuario final se inspira en el diseño de columna única ultr
 
 ### 3.1 Layout Documento-Céntrico de Columna Única (Single-Column)
 *   **Lector de Documentos**: Un lienzo central optimizado con ancho de lectura ideal de `max-w-3xl` o `max-w-4xl` para visualización del resumen ejecutivo o la transcripción, eliminando la sobrecarga visual de múltiples columnas concurrentes.
-*   **Sidebar de Historial y Carpetas**: Una columna izquierda angosta que agrupa accesos de perfil, folders corporativos (temas) e historial cronológico con indicadores de duración.
+*   **Sidebar de Historial y Carpetas**: Una columna izquierda angosta que agrupa accesos de perfil, folders corporativos (temas) e historial cronológico con indicadores de duración. El sidebar permite mover sesiones dentro de carpetas.
+*   **Folder Dashboard**: Al seleccionar una carpeta, el lienzo principal cambia a un Dashboard de Carpeta, ofreciendo un resumen ejecutivo global, la lista de sesiones que la componen, y botones de acción bajo demanda para generar mapas mentales o infografías de todo el contexto acumulado.
 *   **Paneles Deslizables (Drawers)**: El chat con el copilot y las analíticas de gráficos se ocultan en un panel lateral derecho (drawer) que se desliza suavemente sobre la pantalla al invocarse, manteniendo el foco del documento limpio.
 
 ### 3.2 Transcripción con Reproducción Sincronizada

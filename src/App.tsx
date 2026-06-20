@@ -1714,8 +1714,6 @@ This workspace was custom-curated in **⚡ Turbo Fast-Track Mode** to bypass bro
                   ))}
                 </select>
                 )}
-                  ))}
-                </select>
               </>
             ) : (
               <>

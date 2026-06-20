@@ -57,8 +57,11 @@ export interface TopicFolder {
   id: string;
   name: string;
   createdAt: string;
-  aiSynthesis?: string;
+  aiSynthesis?: string;          // Global executive summary of all sessions
   synthesizedAt?: string;
+  mindMap?: MindMapNode;         // Folder-level mind map (generated on-demand)
+  actionItems?: ActionItem[];    // Consolidated action items across all sessions (generated on-demand)
+  chatHistory?: ChatMessage[];   // Chat history when talking to the folder context
 }
 
 export interface ProcessingStatus {
