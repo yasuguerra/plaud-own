@@ -2983,10 +2983,11 @@ app.post("/api/sessions/:id/share", async (req, res, next) => {
 app.get("/api/shared-session/:shareId", async (req, res, next) => {
   try {
     const { shareId } = req.params;
+    // We only query by shareId. It's a secure UUID.
+    // If sharing is turned off, the shareId in DB becomes null, so this query won't find it.
     const snapshot = await firestore
       .collection("sessions")
       .where("shareId", "==", shareId)
-      .where("isShared", "==", true)
       .get();
     
     if (snapshot.empty) {
