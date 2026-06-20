@@ -49,6 +49,8 @@ export interface StudySession {
   error?: string;            // Failure reason if status is 'failed'
   logs?: Array<{ timestamp: string; stage: string; message: string }>;
   progress?: number;         // Processing progress percentage (0-100)
+  isShared?: boolean;        // Whether the session is shared publicly
+  shareId?: string | null;   // The public share ID
 }
 
 export interface TopicFolder {
@@ -71,5 +73,7 @@ export interface UserProfile {
   displayName: string;
   companyName?: string;
   frequentSpeakers?: string;
+  calibrationAudioUrl?: string; // Voice Calibration GCS URL
+  calibrationStatus?: 'PENDING' | 'COMPLETED'; // State of the user's voice calibration
   updatedAt?: string;
 }

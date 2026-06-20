@@ -1,6 +1,7 @@
-import React from "react";
-import { FolderHeart, Trash2, Calendar, FileAudio, FileVideo, ChevronRight, FileText, BookOpen } from "lucide-react";
+import React, { useState } from "react";
+import { FolderHeart, Trash2, Calendar, FileAudio, FileVideo, ChevronRight, FileText, BookOpen, Mic } from "lucide-react";
 import { StudySession } from "../types";
+import { VoiceCalibrationModal } from "./VoiceCalibrationModal";
 
 interface SidebarHistoryProps {
   sessions: StudySession[];
@@ -15,6 +16,9 @@ export default function SidebarHistory({
   onSelectSession,
   onDeleteSession,
 }: SidebarHistoryProps) {
+  const [showCalibration, setShowCalibration] = useState(false);
+  const userId = "guest"; // FIXME: Reemplazar con el ID real del usuario logueado desde el contexto de Auth
+
   const getFormattedDate = (isoStr: string) => {
     try {
       const d = new Date(isoStr);
@@ -95,6 +99,23 @@ export default function SidebarHistory({
           })
         )}
       </div>
+
+      <div className="mt-4 pt-4 border-t border-slate-100">
+        <button 
+          onClick={() => setShowCalibration(true)}
+          className="w-full flex items-center justify-center gap-2 p-3 bg-gradient-to-r from-slate-800 to-slate-900 hover:from-slate-700 hover:to-slate-800 text-white rounded-xl text-sm font-medium transition-all shadow-md shadow-slate-900/20"
+        >
+          <Mic className="h-4 w-4 text-emerald-400" />
+          <span>Calibrar mi Voz</span>
+        </button>
+      </div>
+
+      {showCalibration && (
+        <VoiceCalibrationModal 
+          userId={userId} 
+          onClose={() => setShowCalibration(false)} 
+        />
+      )}
     </div>
   );
 }

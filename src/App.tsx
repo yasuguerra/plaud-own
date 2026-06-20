@@ -336,6 +336,10 @@ export default function App() {
   const [user, setUser] = useState<User | null>(null);
   const [authLoading, setAuthLoading] = useState(true);
 
+  // Shared Mode states
+  const [isSharedMode, setIsSharedMode] = useState(false);
+  const [isSharedModeLoading, setIsSharedModeLoading] = useState(false);
+
   // Settings and Profile states
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   const [companyName, setCompanyName] = useState("");
@@ -381,6 +385,45 @@ export default function App() {
   useEffect(() => {
     let unsubscribe: () => void = () => {};
     
+    // 1. Check Shared Mode before initializing Auth
+    const params = new URLSearchParams(window.location.search);
+    const shareId = params.get('shareId');
+    
+    if (shareId) {
+      setIsSharedMode(true);
+      setIsSharedModeLoading(true);
+      
+      // Fetch shared session bypassing Auth
+      fetch(`/api/shared-session/${shareId}`)
+        .then(res => res.json())
+        .then(data => {
+          if (data.error) {
+            setUploadError(data.error);
+          } else {
+            // Restore local chat history for this guest if any
+            const localChatHistory = localStorage.getItem(`shared_session_chat_${shareId}`);
+            if (localChatHistory) {
+              try { data.chatHistory = JSON.parse(localChatHistory); } catch (e) {}
+            } else {
+              data.chatHistory = []; // Ensure clear chat for guests
+            }
+            
+            setSessions([data]);
+            setActiveSessionId(data.id);
+          }
+          setIsSharedModeLoading(false);
+          setAuthLoading(false); // Stop auth loading
+        })
+        .catch(err => {
+          console.error(err);
+          setUploadError("Error cargando sesión compartida");
+          setIsSharedModeLoading(false);
+          setAuthLoading(false);
+        });
+      
+      return; // Do not initialize standard auth flow for Shared Mode
+    }
+
     const setupAuth = async () => {
       const activeAuth = await initFirebase();
       if (activeAuth) {
@@ -492,6 +535,20 @@ export default function App() {
   const saveSessions = async (updatedList: StudySession[]) => {
     // 1. Instantly update local react state and localStorage for fast/responsive UI
     setSessions(updatedList);
+    
+    // In shared mode, intercept saving to only keep chat in localStorage for the guest
+    if (isSharedMode) {
+      const active = updatedList.find(s => s.id === activeSessionId);
+      if (active) {
+        const params = new URLSearchParams(window.location.search);
+        const shareId = params.get('shareId');
+        if (shareId && active.chatHistory) {
+          localStorage.setItem(`shared_session_chat_${shareId}`, JSON.stringify(active.chatHistory));
+        }
+      }
+      return;
+    }
+
     localStorage.setItem("study_buddy_sessions", JSON.stringify(updatedList));
 
     const userId = user ? user.uid : "guest";
@@ -641,6 +698,38 @@ export default function App() {
   };
 
   const activeSession = getActiveSession();
+
+  const handleToggleShare = async () => {
+    if (!activeSession || isSharedMode) return;
+    try {
+      const isShared = !activeSession.isShared;
+      const userId = user ? user.uid : "guest";
+      const res = await fetch(`/api/sessions/${activeSession.id}/share`, {
+        method: 'POST',
+        headers: { 
+          'Content-Type': 'application/json',
+          "x-user-id": userId 
+        },
+        body: JSON.stringify({ isShared })
+      });
+      const data = await res.json();
+      
+      if (data.success) {
+        const updated = { ...activeSession, isShared: data.isShared, shareId: data.shareId };
+        saveSessions(sessions.map(s => s.id === activeSession.id ? updated : s));
+        if (data.isShared && data.shareId) {
+           const shareUrl = `${window.location.origin}/?shareId=${data.shareId}`;
+           navigator.clipboard.writeText(shareUrl);
+           alert(`Enlace público copiado al portapapeles:\n${shareUrl}`);
+        } else {
+           alert("Enlace público desactivado exitosamente.");
+        }
+      }
+    } catch (err) {
+      console.error(err);
+      alert("Error al compartir la sesión. Revisa la consola.");
+    }
+  };
 
   // Progress Feedback Simulation
   const simulateLoadingStages = async (isRealFile: boolean) => {
@@ -1455,18 +1544,20 @@ This workspace was custom-curated in **⚡ Turbo Fast-Track Mode** to bypass bro
     setTimeout(() => setIsCopingSummary(false), 2000);
   };
 
-  if (authLoading) {
+  if (authLoading || isSharedModeLoading) {
     return (
       <div className="flex h-screen w-full items-center justify-center bg-slate-50 font-sans text-slate-900">
         <div className="flex flex-col items-center justify-center text-center space-y-4">
           <Loader2 className="h-8 w-8 animate-spin text-indigo-600" />
-          <p className="text-xs text-slate-500 font-bold uppercase tracking-wider">Cargando Espacio Corporativo...</p>
+          <p className="text-xs text-slate-500 font-bold uppercase tracking-wider">
+            {isSharedModeLoading ? "Cargando sesión compartida..." : "Cargando Espacio Corporativo..."}
+          </p>
         </div>
       </div>
     );
   }
 
-  if (!user) {
+  if (!user && !isSharedMode) {
     return (
       <div className="flex h-screen w-full bg-slate-950 font-sans text-white overflow-hidden relative">
         {/* Subtle grid mesh decoration */}
@@ -1534,6 +1625,7 @@ This workspace was custom-curated in **⚡ Turbo Fast-Track Mode** to bypass bro
   return (
     <div className="flex h-screen w-full bg-slate-50 font-sans text-slate-900 overflow-hidden">
       {/* Sidebar Navigation */}
+      {!isSharedMode && (
       <aside className="w-16 md:w-20 bg-white border-r border-slate-200 flex flex-col items-center py-6 gap-8 shrink-0">
         <div className="w-10 h-10 bg-indigo-600 rounded-lg flex items-center justify-center text-white font-bold text-xl cursor-pointer shadow-xs hover:bg-indigo-700 transition" onClick={() => setActiveSessionId(null)} title="New Study Block">
           Σ
@@ -1584,6 +1676,7 @@ This workspace was custom-curated in **⚡ Turbo Fast-Track Mode** to bypass bro
           <div className="w-3.5 h-3.5 rounded-full bg-indigo-600" title="API Connected" />
         </div>
       </aside>
+      )}
 
       {/* Main Workspace */}
       <main className="flex-1 flex flex-col min-w-0 h-full overflow-hidden bg-slate-50">
@@ -1599,10 +1692,11 @@ This workspace was custom-curated in **⚡ Turbo Fast-Track Mode** to bypass bro
                   {activeSession.title || activeSession.mediaName}
                 </h1>
                 <span className="bg-indigo-50 text-indigo-600 text-[10px] px-2 py-0.5 rounded border border-indigo-100 font-medium shrink-0">
-                  {activeSession.mediaType === "video" ? "Video Processed" : "Audio Processed"}
+                  {isSharedMode ? "Acceso de Invitado" : (activeSession.mediaType === "video" ? "Video Processed" : "Audio Processed")}
                 </span>
                 
                 {/* Topic Folder Move Selector */}
+                {!isSharedMode && (
                 <select
                   value={activeSession.folderId || ""}
                   onChange={(e) => {
@@ -1619,6 +1713,9 @@ This workspace was custom-curated in **⚡ Turbo Fast-Track Mode** to bypass bro
                     </option>
                   ))}
                 </select>
+                )}
+                  ))}
+                </select>
               </>
             ) : (
               <>
@@ -1632,8 +1729,29 @@ This workspace was custom-curated in **⚡ Turbo Fast-Track Mode** to bypass bro
             )}
           </div>
           <div className="flex items-center gap-3">
-            {user ? (
+            {isSharedMode ? (
+              <a 
+                href="/"
+                className="px-4 py-2 text-xs font-bold text-indigo-600 bg-indigo-50 border border-indigo-100 hover:bg-indigo-100 rounded-lg shadow-2xs transition cursor-pointer"
+              >
+                Sign up for PLAUD
+              </a>
+            ) : user ? (
               <div className="flex items-center gap-2.5">
+                {activeSession && (
+                  <button
+                    onClick={handleToggleShare}
+                    className={`px-3 py-1.5 text-xs font-bold rounded-lg border transition cursor-pointer flex items-center gap-1.5 ${
+                      activeSession.isShared 
+                        ? 'bg-emerald-50 text-emerald-600 border-emerald-200 hover:bg-emerald-100' 
+                        : 'bg-white text-slate-600 border-slate-200 hover:bg-slate-50'
+                    }`}
+                    title="Compartir Sesión Públicamente"
+                  >
+                    <ArrowRight className="w-3.5 h-3.5" />
+                    {activeSession.isShared ? 'Enlace Activo' : 'Compartir'}
+                  </button>
+                )}
                 <div className="flex flex-col text-right hidden md:flex">
                   <span className="text-[11px] font-bold text-slate-800 leading-none">{user.displayName || "Usuario"}</span>
                   <span className="text-[9px] text-slate-400 font-semibold mt-0.5 leading-none">{user.email}</span>
@@ -1689,7 +1807,7 @@ This workspace was custom-curated in **⚡ Turbo Fast-Track Mode** to bypass bro
               </button>
             )}
 
-            {activeSession && (
+            {activeSession && !isSharedMode && (
               <button 
                 onClick={() => setActiveSessionId(null)}
                 className="px-4 py-2 text-xs font-semibold text-white bg-indigo-600 hover:bg-indigo-700 rounded-lg shadow-2xs transition cursor-pointer"
@@ -1809,7 +1927,7 @@ This workspace was custom-curated in **⚡ Turbo Fast-Track Mode** to bypass bro
           <section className="flex-1 grid grid-cols-12 gap-0 overflow-hidden min-h-0 relative">
             
             {/* Column 1: Clean, Consolidated Sidebar (Span 3) */}
-            {!isSidebarCollapsed && (
+            {(!isSidebarCollapsed && !isSharedMode) && (
               <div className="col-span-12 lg:col-span-3 border-r border-slate-200 p-5 flex flex-col gap-6 bg-white overflow-y-auto h-full animate-fade-in">
               
               {activeSidebarTab === "templates" ? (
@@ -1979,13 +2097,14 @@ This workspace was custom-curated in **⚡ Turbo Fast-Track Mode** to bypass bro
             )}
 
             {/* Column 2: Document-First Spacious Reader Area (Span 9 or 12 depending on collapse state) */}
-            <div className={`col-span-12 ${isSidebarCollapsed ? "lg:col-span-12" : "lg:col-span-9"} bg-slate-50/50 p-6 md:p-8 flex flex-col overflow-y-auto h-full min-h-0 transition-all duration-300`}>
+            <div className={`col-span-12 ${(isSidebarCollapsed || isSharedMode) ? "lg:col-span-12" : "lg:col-span-9"} bg-slate-50/50 p-6 md:p-8 flex flex-col overflow-y-auto h-full min-h-0 transition-all duration-300`}>
               <div className="max-w-4xl w-full mx-auto flex flex-col flex-1 gap-5 min-h-0">
                 
                 {/* Header Row: Title & Actions Bar */}
                 <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 border-b border-slate-200 pb-4">
                   <div className="flex items-center gap-3">
                     {/* Collapsible toggle handle button */}
+                    {!isSharedMode && (
                     <button
                       onClick={() => setIsSidebarCollapsed(!isSidebarCollapsed)}
                       className="p-2.5 bg-white border border-slate-200/80 rounded-xl text-slate-500 hover:text-slate-800 hover:bg-slate-50 transition cursor-pointer shadow-3xs hover:shadow-2xs active:scale-95 text-xs font-bold"
@@ -1993,6 +2112,7 @@ This workspace was custom-curated in **⚡ Turbo Fast-Track Mode** to bypass bro
                     >
                       {isSidebarCollapsed ? "▶" : "◀"}
                     </button>
+                    )}
                     <div className="flex flex-col gap-1">
                       <h1 className="text-lg md:text-xl font-black text-slate-900 tracking-tight leading-tight">
                         {activeSession.title || activeSession.mediaName}
@@ -2161,6 +2281,7 @@ This workspace was custom-curated in **⚡ Turbo Fast-Track Mode** to bypass bro
                         items={activeSession.actionItems}
                         onToggleItem={handleToggleTask}
                         onDeleteItem={handleDeleteTask}
+                        isSharedMode={isSharedMode}
                       />
                     </div>
                   )}
@@ -2299,7 +2420,7 @@ This workspace was custom-curated in **⚡ Turbo Fast-Track Mode** to bypass bro
           <section className="flex-1 grid grid-cols-12 gap-0 overflow-hidden min-h-0 relative">
             
             {/* Column 1: Clean, Consolidated Sidebar (Span 3) */}
-            {!isSidebarCollapsed && (
+            {(!isSidebarCollapsed && !isSharedMode) && (
               <div className="col-span-12 lg:col-span-3 border-r border-slate-200 p-5 flex flex-col gap-6 bg-white overflow-y-auto h-full animate-fade-in">
                 {activeSidebarTab === "templates" ? (
                   /* Formatos de Resumen (Templates) Panel */
@@ -2408,9 +2529,10 @@ This workspace was custom-curated in **⚡ Turbo Fast-Track Mode** to bypass bro
             )}
 
             {/* Column 2: Centered Ingestion Card Area */}
-            <div className={`col-span-12 ${isSidebarCollapsed ? "lg:col-span-12" : "lg:col-span-9"} bg-slate-50/50 p-6 md:p-12 overflow-y-auto h-full flex items-center justify-center relative`}>
+            <div className={`col-span-12 ${(isSidebarCollapsed || isSharedMode) ? "lg:col-span-12" : "lg:col-span-9"} bg-slate-50/50 p-6 md:p-12 overflow-y-auto h-full flex items-center justify-center relative`}>
               
               {/* Sidebar toggle handle button */}
+              {!isSharedMode && (
               <button
                 onClick={() => setIsSidebarCollapsed(!isSidebarCollapsed)}
                 className="absolute top-6 left-6 p-2.5 bg-white border border-slate-200/80 rounded-xl text-slate-500 hover:text-slate-800 hover:bg-slate-50 transition cursor-pointer shadow-3xs hover:shadow-2xs active:scale-95 text-xs font-bold"
@@ -2418,6 +2540,7 @@ This workspace was custom-curated in **⚡ Turbo Fast-Track Mode** to bypass bro
               >
                 {isSidebarCollapsed ? "▶" : "◀"}
               </button>
+              )}
 
               {/* Center aligned Apple-style Minimal Ingestion Card */}
               <div className="max-w-xl w-full bg-white border border-slate-200/80 rounded-3xl p-8 md:p-10 shadow-sm flex flex-col gap-6 animate-fade-in">

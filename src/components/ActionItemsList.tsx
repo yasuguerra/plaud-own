@@ -6,9 +6,10 @@ interface ActionItemsListProps {
   items: ActionItem[];
   onToggleItem: (id: string) => void;
   onDeleteItem: (id: string) => void;
+  isSharedMode?: boolean;
 }
 
-export default function ActionItemsList({ items, onToggleItem, onDeleteItem }: ActionItemsListProps) {
+export default function ActionItemsList({ items, onToggleItem, onDeleteItem, isSharedMode }: ActionItemsListProps) {
 
   const completedCount = items.filter((i) => i.completed).length;
   const totalCount = items.length;
@@ -91,8 +92,10 @@ export default function ActionItemsList({ items, onToggleItem, onDeleteItem }: A
               <div className="flex items-center gap-3 flex-1 min-w-0 pr-3">
                 <button
                   type="button"
-                  onClick={() => onToggleItem(item.id)}
-                  className="text-slate-400 hover:text-teal-500 transition duration-100 shrink-0 cursor-pointer"
+                  onClick={() => {
+                    if (!isSharedMode) onToggleItem(item.id);
+                  }}
+                  className={`transition duration-100 shrink-0 ${!isSharedMode ? 'text-slate-400 hover:text-teal-500 cursor-pointer' : 'text-slate-400 cursor-default'}`}
                 >
                   {item.completed ? (
                     <CheckSquare className="h-5 w-5 text-teal-500 fill-teal-50" />
@@ -113,6 +116,7 @@ export default function ActionItemsList({ items, onToggleItem, onDeleteItem }: A
                 <span className={`text-[9px] font-bold uppercase tracking-wider px-2 py-0.5 rounded-full ${getPriorityClasses(item.importance)}`}>
                   {item.importance === "high" ? "Alta" : item.importance === "medium" ? "Media" : "Baja"}
                 </span>
+                {!isSharedMode && (
                 <button
                   type="button"
                   onClick={() => onDeleteItem(item.id)}
@@ -121,6 +125,7 @@ export default function ActionItemsList({ items, onToggleItem, onDeleteItem }: A
                 >
                   <Trash2 className="h-4 w-4" />
                 </button>
+                )}
               </div>
             </div>
           ))

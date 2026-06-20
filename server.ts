@@ -456,6 +456,69 @@ async function transcodeToWav(inputPath: string, outputPath: string): Promise<bo
   }
 }
 
+/**
+ * Extrae un clip de audio de 'duration' segundos empezando en 'startTime'
+ * usando ffmpeg y lo devuelve como un Buffer.
+ */
+async function extractAudioClipAsBuffer(inputPath: string, startTime: number, duration: number): Promise<Buffer> {
+  const outputPath = `${inputPath}_clip_${startTime}.mp3`;
+  try {
+    // Usamos MP3 a 64k para mantener el tamaño muy pequeño y pasarlo a Gemini
+    await execPromise(`ffmpeg -y -i "${inputPath}" -ss ${startTime} -t ${duration} -vn -ar 16000 -ac 1 -b:a 64k "${outputPath}"`);
+    const buffer = fs.readFileSync(outputPath);
+    fs.unlinkSync(outputPath); // Limpiar
+    return buffer;
+  } catch (err: any) {
+    console.error(`[FFMPEG ERROR] Failed to extract clip at ${startTime}:`, err.message || err);
+    throw err;
+  }
+}
+
+/**
+ * Compara un clip extraído de la reunión con el audio de calibración del usuario usando Gemini 3.5 Flash Audio.
+ * 
+ * @param meetingClipBuffer El buffer de audio extraído de la llamada (el speaker que intentamos identificar)
+ * @param calibrationAudioPath Ruta local o buffer del audio original del usuario "calibrado"
+ */
+async function identifySpeakerWithGeminiAudio(genaiClient: any, meetingClipBuffer: Buffer, calibrationAudioBuffer: Buffer): Promise<boolean> {
+  try {
+    const prompt = `Listen to Audio 1 (Calibration Audio) and Audio 2 (Meeting Clip). 
+    I need to know if the voice speaking in the meeting clip matches the voice in the calibration audio. 
+    Analyze the voice timbre, pitch, and cadence. 
+    Answer strictly with "YES" if it is the same person, or "NO" if it is someone else.`;
+
+    const response = await genaiClient.models.generateContent({
+      model: 'gemini-3.5-flash',
+      contents: [
+        prompt,
+        {
+          inlineData: {
+            data: calibrationAudioBuffer.toString("base64"),
+            mimeType: 'audio/mp3',
+          }
+        },
+        {
+          inlineData: {
+            data: meetingClipBuffer.toString("base64"),
+            mimeType: 'audio/mp3',
+          }
+        }
+      ],
+      config: {
+        temperature: 0.1, // Baja temperatura para respuestas más deterministas
+      }
+    });
+
+    const answer = response.text?.trim().toUpperCase() || "";
+    console.log(`[Gemini Audio Match] Result: ${answer}`);
+    return answer.includes("YES");
+
+  } catch (error) {
+    console.error("[Gemini Audio] Error identifying speaker:", error);
+    return false; // Ante la duda, asume falso.
+  }
+}
+
 export function formatTime(seconds: number): string {
   const h = Math.floor(seconds / 3600);
   const m = Math.floor((seconds % 3600) / 60);
@@ -809,11 +872,11 @@ async function runGeminiTranscription(
   const durationSec = await getAudioDuration(processedFilePath);
   console.log(`[PIPELINE] Detected audio file duration: ${durationSec} seconds (${fmtTime(durationSec)}).`);
 
-  const CHUNK_SIZE_SEC = 15 * 60; // 15-minute segments
-  if (durationSec > CHUNK_SIZE_SEC && geminiFileUri) {
-    console.log(`[PIPELINE] File is longer than 15 minutes. Initiating sequential sliding-window chunked transcription...`);
+  const CHUNK_SIZE_SEC = 5 * 60; // 5-minute segments
+  if (durationSec > CHUNK_SIZE_SEC) {
+    console.log(`[PIPELINE] File is longer than 5 minutes. Initiating sequential sliding-window physical chunked transcription...`);
     if (sessionId) {
-      await logToSession(sessionId, "STT_API", `Audio de larga duración detectado (${fmtTime(durationSec)}). Iniciando transcripción fragmentada de fondo...`, 62);
+      await logToSession(sessionId, "STT_API", `Audio de larga duración detectado (${fmtTime(durationSec)}). Iniciando transcripción fragmentada con recorte físico...`, 62);
     }
 
     const segmentsCount = Math.ceil(durationSec / CHUNK_SIZE_SEC);
@@ -828,46 +891,61 @@ async function runGeminiTranscription(
         await logToSession(sessionId, "STT_API", `Transcribiendo segmento ${i + 1} de ${segmentsCount} (${fmtTime(start)} - ${fmtTime(end)})...`, Math.round(62 + (i / segmentsCount) * 12));
       }
 
-      const segmentPrompt = `Analyze the attached audio file: "${fileName}".
-You MUST only transcribe the audio segment starting from ${fmtTime(start)} and ending at ${fmtTime(end)}.
-Do NOT transcribe any other part of the file.
+      const chunkPath = path.join(os.tmpdir(), `${sessionId || 'temp'}_chunk_${i}.mp3`);
+      try {
+        // Physically slice the 5-minute audio chunk using ffmpeg and compress it as a lightweight MP3.
+        await execPromise(`ffmpeg -y -i "${processedFilePath}" -ss ${start} -t ${CHUNK_SIZE_SEC} -vn -ar 16000 -ac 1 -b:a 64k "${chunkPath}"`);
+        const chunkBase64 = fs.readFileSync(chunkPath).toString("base64");
+        fs.unlinkSync(chunkPath);
+
+        const segmentPrompt = `Analyze the attached audio file (Segment ${i + 1} of ${segmentsCount}).
+Generate a complete, high-fidelity transcription of this specific audio segment.
+You MUST separate different speakers (Speaker Diarization) and tag them clearly (e.g. Speaker 1, Speaker 2, Speaker 3).
 
 STRICT TIMESTAMP FORMAT RULE:
 - You MUST only output standard segment-level timestamps in [HH:MM:SS] format (e.g., "[00:01:23]") at the beginning of each dialogue line.
-- Offset your timestamps to reflect the actual time relative to the start of the whole file (i.e. start at ${fmtTime(start)}).
+- Assume this audio starts at 00:00:00. Output timestamps relative to the beginning of THIS audio chunk.
 - Do NOT output millisecond-level timestamps (such as "0m0s", "ms", or "nanos") under any circumstances.
-- Example of correct output format:
-  [${fmtTime(start + 15)}] Speaker 1: Hola, bienvenidos al consultorio.
-  [${fmtTime(start + 32)}] Speaker 2: Gracias doctor, me duele un poco la cabeza.
 
-CRITICAL REPETITION & COMPLETENESS RULE:
-- Transcribe this specific segment from start to finish linearly. Do not get stuck in a repetitive loop.
-- You MUST separate different speakers (Speaker Diarization) and tag them clearly (e.g., Speaker 1, Speaker 2, Speaker 3).
-- Continue transcribing until the end of this segment (${fmtTime(end)}). Ensure this segment's transcript is 100% complete.
+CRITICAL LANGUAGE REQUIREMENT: Transcribe exactly what is spoken. If the audio is in Spanish, the transcript MUST be in Spanish. If it is in English, the transcript MUST be in English. Do not translate the spoken words.`;
 
-CRITICAL LANGUAGE REQUIREMENT: Transcribe exactly what is spoken. If the audio is in Spanish, the transcript MUST be in Spanish. If it is in English, the transcript MUST be in English. Do not translate the spoken words during transcription.`;
+        const contentsPayload = [
+          {
+            inlineData: {
+              mimeType: "audio/mp3",
+              data: chunkBase64
+            }
+          },
+          { text: segmentPrompt }
+        ];
 
-      const contentsPayload = [
-        {
-          fileData: {
-            fileUri: geminiFileUri,
-            mimeType: uploadMime,
+        const response = await generateWithFallback({
+          model: "gemini-3.5-flash",
+          contents: contentsPayload,
+          config: {
+            temperature: 0.1,
           }
-        },
-        { text: segmentPrompt }
-      ];
+        });
 
-      const response = await generateWithFallback({
-        model: "gemini-3.5-flash",
-        contents: contentsPayload,
-        config: {
-          temperature: 0.1,
-        }
-      });
+        let chunkText = response.text || "";
+        
+        // Post-process the generated timestamps deterministically to offset them by 'start' seconds.
+        chunkText = chunkText.replace(/\[(\d{1,2}):(\d{2})(?::(\d{2}))?\]/g, (match, p1, p2, p3) => {
+          let hours = p3 ? parseInt(p1, 10) : 0;
+          let minutes = p3 ? parseInt(p2, 10) : parseInt(p1, 10);
+          let seconds = p3 ? parseInt(p3, 10) : parseInt(p2, 10);
+          let totalSecs = hours * 3600 + minutes * 60 + seconds + start;
+          const h = Math.floor(totalSecs / 3600);
+          const m = Math.floor((totalSecs % 3600) / 60);
+          const s = Math.floor(totalSecs % 60);
+          const pad = (n: number) => n.toString().padStart(2, "0");
+          return `[${pad(h)}:${pad(m)}:${pad(s)}]`;
+        });
 
-      const chunkText = response.text;
-      if (chunkText) {
         transcripts.push(chunkText.trim());
+      } catch (chunkErr) {
+        console.error(`[PIPELINE ERROR] Failed to process chunk ${i}:`, chunkErr);
+        transcripts.push(`[Error procesando segmento ${i + 1}]`);
       }
     }
 
@@ -876,7 +954,7 @@ CRITICAL LANGUAGE REQUIREMENT: Transcribe exactly what is spoken. If the audio i
     return fullTranscript;
   }
 
-  // Fallback for short files (<15 mins) or if geminiFileUri is missing
+  // Fallback for short files (<5 mins) or if geminiFileUri is missing
   const transcriptPrompt = `Analyze the attached audio file: "${fileName}".
 Generate a complete, high-fidelity transcription of the spoken conversation.
 You MUST separate different speakers (Speaker Diarization) and tag them clearly (e.g. Speaker 1, Speaker 2, Speaker 3).
@@ -2862,6 +2940,70 @@ app.post("/api/sessions", async (req, res, next) => {
   }
 });
 
+// 2b. Share or unshare a session
+app.post("/api/sessions/:id/share", async (req, res, next) => {
+  try {
+    const { id } = req.params;
+    const userId = (req.headers["x-user-id"] || "guest") as string;
+    const docRef = firestore.collection("sessions").doc(id);
+    const doc = await docRef.get();
+    
+    if (!doc.exists) {
+      res.status(404).json({ error: "Session not found" });
+      return;
+    }
+    
+    const data = doc.data() as any;
+    if (data.userId !== userId) {
+      res.status(403).json({ error: "Unauthorized" });
+      return;
+    }
+    
+    const { isShared } = req.body;
+    let shareId = data.shareId;
+    
+    // Use native node crypto to generate a UUID
+    if (isShared && !shareId) {
+      const crypto = require("crypto");
+      shareId = crypto.randomUUID();
+    } else if (!isShared) {
+      shareId = null;
+    }
+    
+    await docRef.update({ isShared, shareId });
+    console.log(`[FIRESTORE] Session ${id} share status updated to ${isShared} (Share ID: ${shareId})`);
+    res.json({ success: true, isShared, shareId });
+  } catch (error: any) {
+    console.error("[FIRESTORE ERROR] Failed to update share status:", error);
+    next(error);
+  }
+});
+
+// 2c. Fetch a shared session
+app.get("/api/shared-session/:shareId", async (req, res, next) => {
+  try {
+    const { shareId } = req.params;
+    const snapshot = await firestore
+      .collection("sessions")
+      .where("shareId", "==", shareId)
+      .where("isShared", "==", true)
+      .limit(1)
+      .get();
+    
+    if (snapshot.empty) {
+      res.status(404).json({ error: "Shared session not found or link has expired." });
+      return;
+    }
+    
+    const session = snapshot.docs[0].data();
+    console.log(`[FIRESTORE] Successfully fetched shared session ${session.id}.`);
+    res.json(session);
+  } catch (error: any) {
+    console.error("[FIRESTORE ERROR] Failed to fetch shared session:", error);
+    next(error);
+  }
+});
+
 // 3. Delete a study session from Firestore (with ownership check)
 app.delete("/api/sessions/:id", async (req, res, next) => {
   try {
@@ -3178,6 +3320,50 @@ app.post("/api/users/profile", async (req, res, next) => {
     res.json(updatedProfile);
   } catch (error: any) {
     console.error("[FIRESTORE ERROR] Failed to save user profile:", error);
+    next(error);
+  }
+});
+
+// 3. Upload Voice Calibration Audio
+app.post("/api/users/calibration", upload.single("file"), async (req, res, next) => {
+  try {
+    const userId = (req.headers["x-user-id"] || "guest") as string;
+    const file = req.file;
+
+    if (!file) {
+      res.status(400).json({ error: "Audio file is required" });
+      return;
+    }
+
+    console.log(`[CALIBRATION] Received voice calibration for user ${userId}`);
+
+    // Upload to GCS
+    const destination = `users/${userId}/calibration.mp3`;
+    const gcsUri = await uploadToGCS(file.path, destination, "audio/mp3");
+
+    if (!gcsUri) {
+      throw new Error("Failed to upload calibration to GCS.");
+    }
+
+    // Update Firestore Profile
+    const updatedProfile = {
+      calibrationAudioUrl: gcsUri,
+      calibrationStatus: "COMPLETED",
+      updatedAt: new Date().toISOString()
+    };
+
+    await firestore.collection("users").doc(userId).set(updatedProfile, { merge: true });
+
+    // Clean up local temp file
+    if (fs.existsSync(file.path)) {
+      fs.unlinkSync(file.path);
+    }
+
+    console.log(`[CALIBRATION] Successfully updated profile for user ${userId}`);
+    res.json({ message: "Calibration successful", profile: updatedProfile });
+
+  } catch (error: any) {
+    console.error("[CALIBRATION ERROR] Failed to save user voice calibration:", error);
     next(error);
   }
 });
