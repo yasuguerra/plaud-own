@@ -24,7 +24,8 @@ import {
   FolderTree,
   Settings,
   Mic,
-  Building
+  Building,
+  Share2
 } from "lucide-react";
 
 import { StudySession, ProcessingStatus, ActionItem, Flashcard, ChatMessage, TopicFolder } from "./types";
@@ -37,6 +38,7 @@ import ChatBuddy from "./components/ChatBuddy";
 import SidebarHistory from "./components/SidebarHistory";
 import InfographicsDashboard from "./components/InfographicsDashboard";
 import FolderDashboard from "./components/FolderDashboard";
+import ShareModal from "./components/ShareModal";
 
 // Simple reliable custom Markdown formatter component for React 19 compatibility
 export function FormatMarkdown({ text }: { text: string }) {
@@ -310,6 +312,7 @@ export default function App() {
   const [selectedTemplateId, setSelectedTemplateId] = useState("client-needs");
   const [processingMode, setProcessingMode] = useState<"turbo" | "high-fidelity">("high-fidelity");
   const [activePreviewTemplateId, setActivePreviewTemplateId] = useState<string | null>(null);
+  const [isShareModalOpen, setIsShareModalOpen] = useState(false);
   const [frequentSpeakers, setFrequentSpeakers] = useState("");
   const [activeSidebarTab, setActiveSidebarTab] = useState<"history" | "templates">("history");
   const [isPlaying, setIsPlaying] = useState(false);
@@ -700,10 +703,9 @@ export default function App() {
 
   const activeSession = getActiveSession();
 
-  const handleToggleShare = async () => {
-    if (!activeSession || isSharedMode) return;
+  const handleToggleShare = async (newState: boolean): Promise<{ success: boolean; shareId?: string | null }> => {
+    if (!activeSession || isSharedMode) return { success: false };
     try {
-      const isShared = !activeSession.isShared;
       const userId = user ? user.uid : "guest";
       const res = await fetch(`/api/sessions/${activeSession.id}/share`, {
         method: 'POST',
@@ -711,24 +713,20 @@ export default function App() {
           'Content-Type': 'application/json',
           "x-user-id": userId 
         },
-        body: JSON.stringify({ isShared })
+        body: JSON.stringify({ isShared: newState })
       });
       const data = await res.json();
       
       if (data.success) {
         const updated = { ...activeSession, isShared: data.isShared, shareId: data.shareId };
         saveSessions(sessions.map(s => s.id === activeSession.id ? updated : s));
-        if (data.isShared && data.shareId) {
-           const shareUrl = `${window.location.origin}/?shareId=${data.shareId}`;
-           navigator.clipboard.writeText(shareUrl);
-           alert(`Enlace público copiado al portapapeles:\n${shareUrl}`);
-        } else {
-           alert("Enlace público desactivado exitosamente.");
-        }
+        return { success: true, shareId: data.shareId };
       }
+      return { success: false };
     } catch (err) {
       console.error(err);
       alert("Error al compartir la sesión. Revisa la consola.");
+      return { success: false };
     }
   };
 
@@ -1749,20 +1747,6 @@ This workspace was custom-curated in **⚡ Turbo Fast-Track Mode** to bypass bro
               </a>
             ) : user ? (
               <div className="flex items-center gap-2.5">
-                {activeSession && (
-                  <button
-                    onClick={handleToggleShare}
-                    className={`px-3 py-1.5 text-xs font-bold rounded-lg border transition cursor-pointer flex items-center gap-1.5 ${
-                      activeSession.isShared 
-                        ? 'bg-emerald-50 text-emerald-600 border-emerald-200 hover:bg-emerald-100' 
-                        : 'bg-white text-slate-600 border-slate-200 hover:bg-slate-50'
-                    }`}
-                    title="Compartir Sesión Públicamente"
-                  >
-                    <ArrowRight className="w-3.5 h-3.5" />
-                    {activeSession.isShared ? 'Enlace Activo' : 'Compartir'}
-                  </button>
-                )}
                 <div className="flex flex-col text-right hidden md:flex">
                   <span className="text-[11px] font-bold text-slate-800 leading-none">{user.displayName || "Usuario"}</span>
                   <span className="text-[9px] text-slate-400 font-semibold mt-0.5 leading-none">{user.email}</span>
@@ -2055,6 +2039,21 @@ This workspace was custom-curated in **⚡ Turbo Fast-Track Mode** to bypass bro
                             </option>
                           ))}
                         </select>
+                        
+                        {!isSharedMode && (
+                          <button
+                            onClick={() => setIsShareModalOpen(true)}
+                            className={`ml-2 px-2.5 py-0.5 text-[9px] font-bold rounded-md border transition cursor-pointer flex items-center gap-1 shadow-3xs ${
+                              activeSession.isShared 
+                                ? 'bg-emerald-50 text-emerald-700 border-emerald-200 hover:bg-emerald-100' 
+                                : 'bg-white text-slate-600 border-slate-200 hover:bg-slate-50 hover:text-slate-900'
+                            }`}
+                            title="Compartir Minuta"
+                          >
+                            <Share2 className="w-3 h-3" />
+                            {activeSession.isShared ? 'Compartido' : 'Compartir'}
+                          </button>
+                        )}
                       </div>
                     </div>
                   </div>
@@ -2400,10 +2399,8 @@ This workspace was custom-curated in **⚡ Turbo Fast-Track Mode** to bypass bro
                       Sube tus archivos multimedia o de texto para que la IA realice una transcripción diarizada y un resumen ejecutivo estructurado.
                     </p>
                   </div>
-                </div>
-              )}
 
-              {/* Premium Processing Mode Toggle */}
+                  {/* Premium Processing Mode Toggle */}
               <div className="bg-slate-50 border border-slate-100 p-3.5 rounded-2xl flex items-center justify-between gap-4 font-sans text-xs">
                 <div className="space-y-0.5 text-left">
                   <span className="font-extrabold text-slate-800 text-[11px] block">Modo de Procesamiento IA</span>
@@ -2631,6 +2628,9 @@ This workspace was custom-curated in **⚡ Turbo Fast-Track Mode** to bypass bro
                   >
                     🚀 Build Simulated Workspace Instantly
                   </button>
+                </div>
+              )}
+
                 </div>
               )}
 
@@ -2969,6 +2969,15 @@ This workspace was custom-curated in **⚡ Turbo Fast-Track Mode** to bypass bro
           >
             <Sparkles className="h-5 w-5 animate-pulse" />
           </button>
+        )}
+
+        {/* Share Modal Component */}
+        {isShareModalOpen && activeSession && (
+          <ShareModal 
+            session={activeSession}
+            onClose={() => setIsShareModalOpen(false)}
+            onToggleShare={handleToggleShare}
+          />
         )}
 
       </main>
