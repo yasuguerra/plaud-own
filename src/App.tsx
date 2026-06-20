@@ -1719,12 +1719,7 @@ This workspace was custom-curated in **⚡ Turbo Fast-Track Mode** to bypass bro
           </div>
           <div className="flex items-center gap-3">
             {isSharedMode ? (
-              <a 
-                href="/"
-                className="px-4 py-2 text-xs font-bold text-indigo-600 bg-indigo-50 border border-indigo-100 hover:bg-indigo-100 rounded-lg shadow-2xs transition cursor-pointer"
-              >
-                Sign up for PLAUD
-              </a>
+              null
             ) : user ? (
               <div className="flex items-center gap-2.5">
                 <div className="flex flex-col text-right hidden md:flex">
