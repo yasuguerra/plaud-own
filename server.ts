@@ -2987,7 +2987,6 @@ app.get("/api/shared-session/:shareId", async (req, res, next) => {
       .collection("sessions")
       .where("shareId", "==", shareId)
       .where("isShared", "==", true)
-      .limit(1)
       .get();
     
     if (snapshot.empty) {
