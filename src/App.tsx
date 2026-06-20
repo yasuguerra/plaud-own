@@ -1705,26 +1705,6 @@ This workspace was custom-curated in **⚡ Turbo Fast-Track Mode** to bypass bro
                 <span className="bg-indigo-50 text-indigo-600 text-[10px] px-2 py-0.5 rounded border border-indigo-100 font-medium shrink-0">
                   {isSharedMode ? "Acceso de Invitado" : (activeSession.mediaType === "video" ? "Video Processed" : "Audio Processed")}
                 </span>
-                
-                {/* Topic Folder Move Selector */}
-                {!isSharedMode && (
-                <select
-                  value={activeSession.folderId || ""}
-                  onChange={(e) => {
-                    const val = e.target.value === "" ? null : e.target.value;
-                    handleMoveSessionToFolder(activeSession.id, val);
-                  }}
-                  className="bg-slate-50 border border-slate-200 text-slate-700 text-[10px] font-bold px-2 py-1 rounded-md cursor-pointer transition focus:outline-hidden hover:bg-slate-100"
-                  title="Asignar Tema de Reunión"
-                >
-                  <option value="">📂 Sin Tema (General)</option>
-                  {folders.map(f => (
-                    <option key={f.id} value={f.id}>
-                      📂 {f.name}
-                    </option>
-                  ))}
-                </select>
-                )}
               </>
             ) : (
               <>
@@ -2023,6 +2003,7 @@ This workspace was custom-curated in **⚡ Turbo Fast-Track Mode** to bypass bro
                         </span>
                         
                         {/* Topic Folder Selector */}
+                        {!isSharedMode && (
                         <select
                           value={activeSession.folderId || ""}
                           onChange={(e) => {
@@ -2039,6 +2020,7 @@ This workspace was custom-curated in **⚡ Turbo Fast-Track Mode** to bypass bro
                             </option>
                           ))}
                         </select>
+                        )}
                         
                         {!isSharedMode && (
                           <button
@@ -2375,7 +2357,23 @@ This workspace was custom-curated in **⚡ Turbo Fast-Track Mode** to bypass bro
               </button>
               )}
 
-              {activeFolderId !== null ? (
+              {isSharedMode ? (
+                // --- GUEST VIEW ERROR / EXPIRED LINK ---
+                <div className="max-w-xl w-full bg-white border border-slate-200/80 rounded-3xl p-12 shadow-sm flex flex-col items-center text-center gap-6 animate-fade-in">
+                  <div className="h-16 w-16 bg-rose-50 text-rose-500 rounded-full flex items-center justify-center shadow-3xs mb-2">
+                    <AlertCircle className="h-8 w-8" />
+                  </div>
+                  <h1 className="text-2xl font-black text-slate-900 tracking-tight">
+                    Enlace no disponible
+                  </h1>
+                  <p className="text-sm text-slate-500 leading-relaxed max-w-sm">
+                    {uploadError || "La sesión que intentas ver no existe o el propietario ha revocado el acceso público."}
+                  </p>
+                  <a href="/" className="mt-4 px-6 py-3 bg-indigo-600 hover:bg-indigo-700 text-white font-bold rounded-xl transition cursor-pointer shadow-xs">
+                    Ir al inicio de PLAUD
+                  </a>
+                </div>
+              ) : activeFolderId !== null ? (
                 // --- FOLDER DASHBOARD VIEW ---
                 <FolderDashboard 
                   folder={folders.find(f => f.id === activeFolderId)!} 
