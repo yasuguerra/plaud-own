@@ -3042,7 +3042,12 @@ app.get("/api/sessions/:id/media", async (req, res, next) => {
       return;
     }
     const session = doc.data();
-    if (session?.userId && session.userId !== userId) {
+    
+    // Allow access if the user owns it, OR if the session is currently publicly shared
+    const isOwner = session?.userId && session.userId === userId;
+    const isPubliclyShared = session?.isShared === true;
+    
+    if (!isOwner && !isPubliclyShared) {
       res.status(403).json({ error: "Forbidden: Access denied to this media file" });
       return;
     }
