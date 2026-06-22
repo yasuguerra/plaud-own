@@ -452,6 +452,7 @@ export default function App() {
   // Fetch sessions and folders when authenticated user changes
   useEffect(() => {
     if (authLoading) return;
+    if (isSharedMode) return;
 
     const userId = user ? user.uid : "guest";
     const headers = { "x-user-id": userId };

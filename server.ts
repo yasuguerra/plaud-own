@@ -210,7 +210,7 @@ export class FailSafeFirestore {
                     forEach(callback: (doc: any) => void) {
                       results.forEach(callback);
                     },
-                    empty: results.length === 0,
+                    docs: results, empty: results.length === 0,
                   };
                 }
                 try {
@@ -237,7 +237,7 @@ export class FailSafeFirestore {
                     forEach(callback: (doc: any) => void) {
                       results.forEach(callback);
                     },
-                    empty: results.length === 0,
+                    docs: results, empty: results.length === 0,
                   };
                 }
               },
@@ -261,7 +261,7 @@ export class FailSafeFirestore {
                 forEach(callback: (doc: any) => void) {
                   results.forEach(callback);
                 },
-                empty: results.length === 0,
+                docs: results, empty: results.length === 0,
               };
             }
             try {
@@ -285,7 +285,7 @@ export class FailSafeFirestore {
                 forEach(callback: (doc: any) => void) {
                   results.forEach(callback);
                 },
-                empty: results.length === 0,
+                docs: results, empty: results.length === 0,
               };
             }
           },
@@ -309,7 +309,7 @@ export class FailSafeFirestore {
             forEach(callback: (doc: any) => void) {
               results.forEach(callback);
             },
-            empty: results.length === 0,
+            docs: results, empty: results.length === 0,
           };
         }
         try {
@@ -333,7 +333,7 @@ export class FailSafeFirestore {
             forEach(callback: (doc: any) => void) {
               results.forEach(callback);
             },
-            empty: results.length === 0,
+            docs: results, empty: results.length === 0,
           };
         }
       },
@@ -438,7 +438,7 @@ async function uploadToGCS(filePath: string, destination: string, mimeType: stri
     return `gs://${BUCKET_NAME}/${destination}`;
   } catch (err) {
     console.error("[GCS ERROR] Failed to upload to GCS:", err);
-    return "";
+    return { context: "", calibrationAudioUrl: "", ownerName: "" };
   }
 }
 
@@ -674,24 +674,25 @@ async function transcribeAudioWithChirp2(
   }
 }
 
-async function getUserSpeakerContext(userId: string): Promise<string> {
-  if (!userId || userId === "guest") return "";
+async function getUserSpeakerContext(userId: string): Promise<{ context: string, calibrationAudioUrl: string, ownerName: string }> {
+  if (!userId || userId === "guest") return { context: "", calibrationAudioUrl: "", ownerName: "" };
   try {
     const doc = await firestore.collection("users").doc(userId).get();
     if (doc.exists) {
       const data = doc.data();
       const ownerName = data?.displayName || "";
+      const calibrationAudioUrl = data?.calibrationAudioUrl || "";
       const frequentSpeakers = data?.frequentSpeakers || "";
       let context = `\n\nWORKSPACE OWNER & PARTICIPANTS CONTEXT:`;
       if (ownerName) context += `\n- The owner of this workspace/application is: ${ownerName}. Typically, they are speaking when the speaker context matches the owner.`;
       if (frequentSpeakers) context += `\n- Other frequent participants in these meetings are: ${frequentSpeakers}.`;
       context += `\n- Analyze the voice styles, self-introductions, direct names called, or textual context in the recording. Identify who is speaking and map the generic speaker diarization IDs (e.g. Speaker A, Speaker B) directly to these real names if they are present or referred to. If they cannot be mapped, leave them as Speaker 1, Speaker 2, etc.`;
-      return context;
+      return { context, calibrationAudioUrl, ownerName };
     }
   } catch (err) {
     console.error("Failed to read user speaker context from Firestore:", err);
   }
-  return "";
+  return { context: "", calibrationAudioUrl: "", ownerName: "" };
 }
 
 export function escapeJsonControlCharacters(jsonStr: string): string {
@@ -1145,6 +1146,71 @@ async function executeAudioProcessing(
       }
     }
 
+        // --- BIOMETRIC VALIDATION (PHASE 2 & 3) ---
+    let biometricDirective = "";
+    if (calibrationAudioUrl && ownerName) {
+      await logToSession(sessionId, "BIOMETRICS", "Verificando identidad acústica de oradores...", 78);
+      try {
+        console.log(`[BIOMETRICS] Downloading calibration audio from ${calibrationAudioUrl}...`);
+        const calibMatch = calibrationAudioUrl.match(/gs:\/\/([^\/]+)\/(.+)/);
+        if (calibMatch) {
+          const calibBucket = calibMatch[1];
+          const calibPath = calibMatch[2];
+          const calibLocalPath = require('path').join(require('os').tmpdir(), `${sessionId}_calibration.mp3`);
+          await storage.bucket(calibBucket).file(calibPath).download({ destination: calibLocalPath });
+          const calibrationBuffer = fs.readFileSync(calibLocalPath);
+
+          const speakerStartTimes = {};
+          const lines = finalTranscript.split('\n');
+          for (const line of lines) {
+            const match = line.match(/^\[(\d{1,2}):(\d{2})(?::(\d{2}))?\]\s*([^:]+):/i);
+            if (match) {
+              const speakerName = match[4].trim();
+              if (speakerName.toLowerCase().startsWith('speaker') && !speakerStartTimes[speakerName]) {
+                const p1 = parseInt(match[1]);
+                const p2 = parseInt(match[2]);
+                const p3 = match[3] ? parseInt(match[3]) : undefined;
+                let hours = p3 !== undefined ? p1 : 0;
+                let minutes = p3 !== undefined ? p2 : p1;
+                let seconds = p3 !== undefined ? p3 : p2;
+                
+                speakerStartTimes[speakerName] = hours * 3600 + minutes * 60 + seconds;
+              }
+            }
+          }
+
+          console.log(`[BIOMETRICS] Found speakers to identify: ${Object.keys(speakerStartTimes).join(", ")}`);
+          
+          let identifiedSpeaker = null;
+          for (const [speakerName, startTime] of Object.entries(speakerStartTimes)) {
+            try {
+              console.log(`[BIOMETRICS] Extracting 10s clip for ${speakerName} at ${startTime}s...`);
+              const meetingClipBuffer = await extractAudioClipAsBuffer(processedFilePath, startTime, 10);
+              const isMatch = await identifySpeakerWithGeminiAudio(ai, meetingClipBuffer, calibrationBuffer);
+              if (isMatch) {
+                console.log(`[BIOMETRICS] Match found! ${speakerName} is ${ownerName}`);
+                identifiedSpeaker = speakerName;
+                break;
+              }
+            } catch (err) {
+              console.warn(`[BIOMETRICS] Error analyzing ${speakerName}:`, err);
+            }
+          }
+
+          if (identifiedSpeaker) {
+             biometricDirective = `\nCRITICAL BIOMETRIC VALIDATION: Acoustic analysis has positively verified that "${identifiedSpeaker}" is the workspace owner: "${ownerName}". You MUST map ${identifiedSpeaker} to "${ownerName}" in your speaker mappings and summary.`;
+             await logToSession(sessionId, "BIOMETRICS", `Identidad confirmada: ${identifiedSpeaker} es ${ownerName}.`, 82);
+          } else {
+             await logToSession(sessionId, "BIOMETRICS", "No se encontró coincidencia acústica con el perfil de voz del dueño.", 82);
+          }
+          
+          try { fs.unlinkSync(calibLocalPath); } catch {}
+        }
+      } catch (err) {
+        console.error("[BIOMETRICS] Failed to perform biometric validation:", err);
+      }
+    }
+
     // 4. Etapa 2: Síntesis Estructurada y Mapeo Real (Dual-Pass Stage 2)
     let parsedStudySession: any = null;
 
@@ -1166,7 +1232,7 @@ Based on this transcript, generate:
 3. An exhaustive list of ALL action items, goals, objectives, and decisions made. DO NOT condense or omit any discussed milestone. This is extremely critical: do not skimp on goals (no escatimar en las metas u objetivos).
 4. Resolve the generic speaker labels in the transcript (e.g. '1', '2') to real participant names based on self-introductions, context, or the provided user workspace details, and populate the "speakerMappings" key with this mapping.
 
-Generate fully populated results in JSON format according to the summaryResponseSchema.${speakerContext}
+Generate fully populated results in JSON format according to the summaryResponseSchema.${speakerContext}${biometricDirective}
 
 CRITICAL LANGUAGE REQUIREMENT: All output text (including title, summary, and action items) MUST be strictly in the detected language of the source transcript. If the transcript is in Spanish, the entire JSON output MUST be in Spanish. DO NOT respond in English if the source is in Spanish.`;
 
@@ -2046,7 +2112,7 @@ app.post("/api/process", async (req, res) => {
     const ai = getGeminiClient();
 
     // Fetch user speaker profiles and selected template definitions
-    const speakerContext = await getUserSpeakerContext(userId);
+    const { context: speakerContext, calibrationAudioUrl, ownerName } = await getUserSpeakerContext(userId);
     const selectedTemplate = getTemplateById(templateId || "client-needs");
 
     // Dynamic response schema override for selected template structure
@@ -2329,7 +2395,7 @@ app.post("/api/upload-file", upload.single("file"), async (req, res) => {
     const userId = (req.headers["x-user-id"] || "guest") as string;
 
     // Fetch user speaker profiles and selected template definitions
-    const speakerContext = await getUserSpeakerContext(userId);
+    const { context: speakerContext, calibrationAudioUrl, ownerName } = await getUserSpeakerContext(userId);
     const selectedTemplate = getTemplateById(templateId || "client-needs");
 
     // Dynamic response schema override for selected template structure
@@ -2634,7 +2700,7 @@ app.post("/api/merge-chunks", async (req, res) => {
     const isPDF = resolvedMime.includes("pdf") || fileName.endsWith(".pdf");
 
     // Fetch user speaker profiles and selected template definitions
-    const speakerContext = await getUserSpeakerContext(userId);
+    const { context: speakerContext, calibrationAudioUrl, ownerName } = await getUserSpeakerContext(userId);
     const selectedTemplate = getTemplateById(templateId || "client-needs");
 
     // Create initial placeholder session doc in Firestore with status 'processing'
